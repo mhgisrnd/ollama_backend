@@ -1,0 +1,1 @@
+"""Connected desktop tool execution."""

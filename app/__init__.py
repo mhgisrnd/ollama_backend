@@ -1,0 +1,1 @@
+"""Independent spatial AI backend."""
