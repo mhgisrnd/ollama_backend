@@ -12,6 +12,7 @@ class AgentChatRequest(ChatRequest):
     }})
     client_id: ClientId
     session_id: str | None = Field(default=None, min_length=1, max_length=64, pattern=r"^[a-zA-Z0-9_-]+$")
+    reference_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{32}$", description="reference_id from the last displayed numbered query_result; required for opening files by number")
 
 
 class AgentToolResult(ToolResult):

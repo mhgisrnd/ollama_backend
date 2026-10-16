@@ -95,7 +95,7 @@ class OllamaClient:
                     logger.info("Ollama acquired model=%s queue_seconds=%.2f", self.settings.ollama_model, time.monotonic() - started)
                     phase = "generation"
                     payload = await self._request("POST", "api/chat", json=body)
-                    logger.info("Ollama response model=%s total_seconds=%.2f", self.settings.ollama_model, time.monotonic() - started)
+                    logger.info("Ollama response model=%s total_seconds=%.2f prompt_tokens=%s output_tokens=%s done_reason=%s", self.settings.ollama_model, time.monotonic() - started, payload.get("prompt_eval_count"), payload.get("eval_count"), payload.get("done_reason"))
         except TimeoutError as exc:
             logger.warning("Ollama timeout phase=%s elapsed_seconds=%.2f", phase, time.monotonic() - started)
             raise OllamaError(504, "ollama_timeout", "대기 또는 Ollama 응답 시간이 초과되었습니다.") from exc

@@ -1,6 +1,6 @@
 import pytest
 
-from app.agent.query_engine import FIELDS, Query, QueryError, execute
+from app.agent.query_engine import FIELDS, Query, QueryError, execute, schema, select_positions
 
 ROWS = [
     {"name": "small.tif", "kind": "raster", "path": "small.tif", "visible": True, "size_bytes": 100, "modified_at": 1},
@@ -90,3 +90,56 @@ def test_empty_aggregates_and_invalid_types_are_explicit():
         execute(query(where=[{"field": "visible", "operator": "eq", "values": ["maybe"]}]), ROWS, FIELDS)
     with pytest.raises(QueryError):
         execute(query(where=[{"field": "extension", "operator": "gt", "values": ["tif", "shp"]}]), ROWS, FIELDS)
+
+
+def test_generation_schema_separates_file_rows_from_aggregate_outputs():
+    from jsonschema import Draft202012Validator
+    validator = Draft202012Validator(schema(Query))
+    ranked = query(select=["name", "size_bytes"], order_by=[{"field": "size_bytes", "direction": "desc"}], limit=1)
+    assert validator.is_valid(ranked.model_dump())
+    invalid = ranked.model_dump() | {"aggregate": {"function": "max", "field": "size_bytes"}}
+    assert not validator.is_valid(invalid)
+    scalar = query(select=["value"], aggregate={"function": "max", "field": "size_bytes"})
+    assert validator.is_valid(scalar.model_dump())
+    assert not validator.is_valid(scalar.model_dump() | {"select": ["name", "size_bytes"]})
+    grouped = query(select=["group", "value"], group_by="extension", aggregate={"function": "count", "field": "*"})
+    assert validator.is_valid(grouped.model_dump())
+
+
+def test_ordinal_position_and_top_count_are_distinct_and_followups_use_returned_row():
+    order = [{"field": "size_bytes", "direction": "desc"}]
+    second = execute(query(order_by=order, offset=1, limit=1), ROWS, FIELDS)
+    top_two = execute(query(order_by=order, offset=0, limit=2), ROWS, FIELDS)
+    assert second["records"] == [{"name": "large.TIFF"}]
+    assert top_two["records"] == [{"name": "boundary.shp"}, {"name": "large.TIFF"}]
+    assert second["count"] == 4
+    followup = execute(query(source="previous_result", aggregate={"function": "sum", "field": "size_bytes"}), second["rows"], FIELDS)
+    assert followup["records"][0]["value"] == 900
+    window = execute(query(order_by=order, offset=1, limit=2), ROWS, FIELDS)
+    assert window["records"] == [{"name": "large.TIFF"}, {"name": "middle.tif"}]
+
+
+def test_positions_are_applied_after_filtering_with_missing_size_notice_and_stable_ties():
+    rows = [dict(row) for row in ROWS]
+    rows[0]["size_bytes"] = None
+    rows.append({**ROWS[1], "name": "tie.tiff"})
+    result = execute(query(where=[TIFF], order_by=[{"field": "size_bytes", "direction": "desc"}], offset=1, limit=1), rows, FIELDS)
+    assert result["records"] == [{"name": "tie.tiff"}]
+    assert result["is_partial"] and result["excluded_count"] == 1
+    assert execute(query(offset=1000), ROWS, FIELDS)["records"] == []
+    with pytest.raises(QueryError):
+        execute(query(offset=1, aggregate={"function": "count", "field": "*"}), ROWS, FIELDS)
+
+
+@pytest.mark.parametrize("offset", [-1, 1001, True, 1.5])
+def test_invalid_offsets_are_rejected(offset):
+    from pydantic import ValidationError
+    with pytest.raises(ValidationError):
+        query(offset=offset)
+
+
+def test_noncontiguous_positions_preserve_order_deduplicate_and_reject_invalid_indices():
+    assert select_positions(ROWS, [3, 1, 3]) == [ROWS[2], ROWS[0]]
+    for numbers in ([], [0], [-1], [5], [1, True], [1, 9]):
+        with pytest.raises(QueryError):
+            select_positions(ROWS, numbers)

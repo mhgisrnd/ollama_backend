@@ -9,7 +9,13 @@ class ToolCallRequest(BaseModel):
     }})
     tool_name: str = Field(min_length=1, max_length=64)
     arguments: dict[str, Any] = Field(default_factory=dict)
-    timeout_seconds: float = Field(default=15, ge=1, le=60)
+    timeout_seconds: float = Field(default=15, ge=1, le=180)
+
+    @model_validator(mode="after")
+    def tool_deadline(self):
+        if self.tool_name != "photoshop_open_images" and self.timeout_seconds > 60:
+            raise ValueError("Only image opening supports a timeout above 60 seconds")
+        return self
 
 
 class ToolResult(BaseModel):

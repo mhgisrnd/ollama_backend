@@ -10,10 +10,12 @@ from test_agent import BASE, register
 from test_query_engine import ROWS, TIFF, query
 
 
-def client_for(plans, reviews=None):
+def client_for(plans, reviews=None, captured=None):
     values = iter(plans)
     review_values = iter(reviews) if reviews is not None else None
     def handler(request):
+        if captured is not None:
+            captured.append(json.loads(request.content))
         assert "format" in json.loads(request.content)
         if "decision" in json.loads(request.content)["format"].get("properties", {}):
             value = next(review_values) if review_values else {"decision": "accept", "reason": ""}
@@ -58,7 +60,7 @@ def test_largest_file_and_followup_sum_are_generic_operations():
             pending = pool.submit(client.post, "/api/v1/agent/chat", json=request("largest TIFF"))
             reply(ws, "get_layer_metadata")
             result = pending.result(timeout=5).json()
-            assert result["query_result"]["records"] == [{"name": "large.TIFF", "size_bytes": 900}]
+            assert result["query_result"]["records"] == [{"number": 1, "name": "large.TIFF", "size_bytes": 900}]
             followup = client.post("/api/v1/agent/chat", json=request("sum previous result")).json()
             assert followup["completion_status"] == "completed"
             assert followup["query_result"]["records"][0]["value"] == 900
@@ -106,11 +108,11 @@ def test_missing_values_cannot_be_reported_as_a_global_maximum():
             assert result["completion_status"] == "partial"
             assert result["warning"] == "incomplete_data"
             assert result["query_result"]["records"][0]["name"] == "boundary.shp"
-            assert "전체 대상" in result["message"]["content"]
+            assert "전체 결과와 다를 수 있습니다" in result["message"]["content"]
             result = client.post("/api/v1/agent/chat", json=request("sum previous")).json()
             assert result["completion_status"] == "partial"
             assert result["query_result"]["records"][0]["value"] == 2000
-            assert "전체 대상" in result["message"]["content"]
+            assert "전체 결과와 다를 수 있습니다" in result["message"]["content"]
 
 
 def test_compound_query_lazily_enriches_previous_snapshot():
@@ -124,7 +126,7 @@ def test_compound_query_lazily_enriches_previous_snapshot():
             reply(ws, "get_layer_metadata")
             data = pending.result(timeout=5).json()
             assert data["completion_status"] == "completed"
-            assert data["query_result"]["records"] == [{"name": "large.TIFF", "size_bytes": 900}]
+            assert data["query_result"]["records"] == [{"number": 1, "name": "large.TIFF", "size_bytes": 900}]
 
 
 def test_unsupported_task_stops_entire_plan_and_missing_previous_is_not_faked():
@@ -147,4 +149,77 @@ def test_semantic_review_can_reject_a_valid_but_unrelated_plan_before_execution(
             ws.receive_json()
             result = client.post("/api/v1/agent/chat", json=request("highest resolution")).json()
             assert result["query_result"] is None and result["tool_results"] == []
-            assert "해상도" in result["message"]["content"]
+            assert "조회 방법을 확정하지 못했습니다" in result["message"]["content"]
+
+
+def test_invalid_aggregate_sort_is_repaired_with_rejected_candidate_and_error():
+    invalid = query(select=["name", "size_bytes"], aggregate={"function": "max", "field": "size_bytes"},
+                    order_by=[{"field": "size_bytes", "direction": "desc"}], limit=1).model_dump()
+    correct = query(select=["name", "size_bytes"], order_by=[{"field": "size_bytes", "direction": "desc"}], limit=1).model_dump()
+    captured = []
+    with client_for([tasks("largest file"), invalid, correct], captured=captured) as client:
+        enable_metadata(client)
+        with client.websocket_connect(BASE + "/ws") as ws, ThreadPoolExecutor(1) as pool:
+            ws.receive_json()
+            pending = pool.submit(client.post, "/api/v1/agent/chat", json=request("largest file"))
+            reply(ws, "get_layer_metadata")
+            result = pending.result(timeout=5).json()
+            assert result["completion_status"] == "completed"
+            assert result["query_result"]["records"] == [{"number": 1, "name": "boundary.shp", "size_bytes": 2000}]
+    repair = captured[3]["messages"]
+    feedback = next(json.loads(message["content"]) for message in repair if '"rejected_query"' in message["content"])
+    assert feedback["rejected_query"] == invalid
+    assert "group/value" in feedback["validation_error"]
+
+
+def test_exhausted_repair_keeps_diagnostics_in_logs_only(caplog):
+    candidate = query().model_dump()
+    diagnostic = "집계 후 정렬은 group/value, size_bytes 규칙을 적용하세요."
+    with client_for([tasks("query"), candidate, candidate], reviews=[
+            {"decision": "repair", "reason": diagnostic}, {"decision": "repair", "reason": diagnostic}]) as client:
+        register(client)
+        with client.websocket_connect(BASE + "/ws") as ws:
+            ws.receive_json()
+            result = client.post("/api/v1/agent/chat", json=request("query")).json()
+    assert result["completion_status"] == "failed" and not result["tool_results"]
+    assert "group/value" not in result["message"]["content"]
+    assert diagnostic in caplog.text
+
+
+def test_group_output_aliases_are_valid_plan_fields():
+    grouped = query(select=["group", "value"], group_by="kind", aggregate={"function": "count", "field": "*"},
+                    order_by=[{"field": "value", "direction": "desc"}]).model_dump()
+    with client_for([tasks("counts by kind"), grouped]) as client:
+        register(client)
+        with client.websocket_connect(BASE + "/ws") as ws, ThreadPoolExecutor(1) as pool:
+            ws.receive_json()
+            pending = pool.submit(client.post, "/api/v1/agent/chat", json=request("counts by kind"))
+            reply(ws, "get_layer_list")
+            result = pending.result(timeout=5).json()
+            assert result["completion_status"] == "completed"
+            assert result["query_result"]["records"] == [{"group": "raster", "value": 3}, {"group": "vector", "value": 1}]
+
+
+def test_compound_layer_review_is_scoped_and_photoshop_is_a_separate_task():
+    captured = []
+    plan = {"tasks": [{"tool": "query_layers", "request": "현재 레이어 목록 확인"},
+                      {"tool": "photoshop_ping", "request": "포토샵 연결 상태 확인"}]}
+    with client_for([plan, query(select=["name", "extension", "kind", "visible"]).model_dump()], captured=captured) as client:
+        register(client)
+        with client.websocket_connect(BASE + "/ws") as ws, ThreadPoolExecutor(1) as pool:
+            ws.receive_json()
+            pending = pool.submit(client.post, "/api/v1/agent/chat", json=request("레이어 목록과 포토샵 연결상태 확인해줘"))
+            reply(ws, "get_layer_list")
+            call = ws.receive_json()
+            assert call["tool_name"] == "photoshop_ping"
+            ws.send_json({"type": "tool_result", "call_id": call["call_id"], "status": "succeeded", "result": {"connected": True}})
+            result = pending.result(timeout=5).json()
+            assert result["completion_status"] == "completed" and not result["missing_tools"]
+            assert "포토샵 통신에 성공" in result["message"]["content"]
+            assert len(result["query_result"]["records"]) == 4
+    review = next(value for value in captured if "decision" in value["format"].get("properties", {}))
+    payload = json.loads(review["messages"][-1]["content"])
+    assert payload["request"] == "현재 레이어 목록 확인"
+    assert payload["original_request"] == "레이어 목록과 포토샵 연결상태 확인해줘"
+    assert "photoshop_ping" in payload["available_tools"]
+    assert payload["task_plan"][1]["tool"] == "photoshop_ping"

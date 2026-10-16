@@ -2,6 +2,7 @@
 import argparse
 import asyncio
 import json
+import logging
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -35,15 +36,35 @@ CASES = [
     ("파일 크기가 1 KiB를 넘는 파일의 이름을 보여줘", "rows", ["boundary.shp"]),
     ("TIFF 해상도가 가장 높은 파일은?", "refuse", None),
     ("레이어를 삭제해줘", "refuse", None),
+    ("가장 용량이 큰 파일이 뭐야?", "rows", ["boundary.shp"]),
+    ("레이어 목록중에 두번째로 용량이 큰 파일이 뭐야?", "rows", ["large.TIFF"]),
+    ("파일 크기로 내림차순 정렬해서 세 번째 파일 하나만 알려줘", "rows", ["middle.tif"]),
+    ("용량 순서로 두 번째부터 두 개를 보여줘", "rows", ["large.TIFF", "middle.tif"]),
+    ("레이어 목록에 대해 설명해줘", "rows", [row["name"] for row in ROWS]),
+    ("레이어 목록과 포토샵 연결상태 확인해줘", "list_and_ping", [row["name"] for row in ROWS]),
+    ("포토샵에 열려 있는 문서 목록 알려줘", "photoshop_read", "photoshop_list_documents"),
+    ("포토샵 활성 문서 이름과 크기를 알려줘", "photoshop_read", "photoshop_get_document_info"),
+    ("포토샵 문서의 레이어 목록 알려줘", "photoshop_read", "photoshop_get_layers"),
+    ("현재 목록의 이미지 중 첫 번째 하나를 포토샵에 열어줘", "photoshop_open", ["small.tif"]),
 ]
 
 
 class Desktop:
     def __init__(self):
         self.connections = {"evaluation": SimpleNamespace(connection_id="fixture")}
+        self.next_document_id = 1
     async def call(self, client, body):
         if body.tool_name == "photoshop_ping":
             result = {"connected": True}
+        elif body.tool_name == "photoshop_list_documents":
+            result = {"documents": [{"id": 1, "name": "test.psd"}], "count": 1}
+        elif body.tool_name == "photoshop_get_document_info":
+            result = {"id": 1, "name": "test.psd", "width": 100, "height": 200}
+        elif body.tool_name == "photoshop_get_layers":
+            result = {"layers": [{"name": "Background"}], "layerCount": 1}
+        elif body.tool_name == "photoshop_open_images":
+            result = {"documents": [{"id": self.next_document_id + index, "name": path + " - AI", "source": path} for index, path in enumerate(body.arguments["paths"])], "failures": []}
+            self.next_document_id += len(result["documents"])
         else:
             result = {"count": len(ROWS), "layers": [dict(row) for row in ROWS]}
         return ToolResult(call_id="fixture", status="succeeded", result=result)
@@ -56,9 +77,11 @@ async def evaluate(args):
     async with httpx.AsyncClient(base_url=str(settings.ollama_base_url), timeout=15, trust_env=False) as http:
         state = SimpleNamespace(settings=settings, connections=Desktop(), ollama=OllamaClient(http, settings),
             registry=SimpleNamespace(get_tools=lambda _: SimpleNamespace(tools=[SimpleNamespace(name=name)
-                for name in ("get_layer_list", "get_layer_metadata", "photoshop_ping")])))
+                for name in ("get_layer_list", "get_layer_metadata", "photoshop_ping", "photoshop_list_documents", "photoshop_get_document_info", "photoshop_get_layers", "photoshop_open_images")])))
         agent = GeneralAgent(set())
         for index, (question, expected_type, expected) in enumerate(CASES):
+            if args.case_index is not None and index not in args.case_index:
+                continue
             started = time.monotonic()
             record = {"question": question, "expected_type": expected_type, "passed": False}
             try:
@@ -66,17 +89,25 @@ async def evaluate(args):
                     messages=[{"role": "user", "content": question}]))
                 data = result.query_result
                 passed = False
-                if expected_type == "refuse":
+                if expected_type == "photoshop_read":
+                    passed = result.completion_status == "completed" and any(tool.tool_name == expected and tool.status == "succeeded" for tool in result.tool_results)
+                elif expected_type == "photoshop_open":
+                    opened = next((tool.result for tool in result.tool_results if tool.tool_name == "photoshop_open_images"), None)
+                    passed = result.completion_status == "completed" and opened and [row["source"] for row in opened["documents"]] == expected
+                elif expected_type == "refuse":
                     passed = data is None and result.completion_status != "completed"
                 elif data and result.completion_status == "completed":
-                    if expected_type == "rows":
+                    if expected_type in {"rows", "list_and_ping"}:
                         passed = data["aggregate"] is None and [row.get("name") for row in data["records"]] == expected
+                        if expected_type == "list_and_ping":
+                            passed = passed and any(tool.tool_name == "photoshop_ping" and tool.status == "succeeded" and tool.result.get("connected") is True for tool in result.tool_results)
                     elif expected_type == "group":
                         passed = data["aggregate"] and data["aggregate"]["function"] == "count" and {row["group"]: row["value"] for row in data["records"]} == expected
                     else:
                         passed = (data["aggregate"] and data["aggregate"]["function"] == expected_type
                                   and len(data["records"]) == 1 and data["records"][0]["value"] == expected)
                 record.update(passed=bool(passed), warning=result.warning,
+                              tools=[tool.tool_name for tool in result.tool_results],
                               message=result.message.content,
                               plan=data.get("plan") if data else None, actual=data.get("records") if data else None)
             except (OllamaError, ExecutionError) as exc:
@@ -100,4 +131,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", default="qwen2.5:3b")
     parser.add_argument("--report", type=Path, default=Path("data/evaluations/general_agent.json"))
-    asyncio.run(evaluate(parser.parse_args()))
+    parser.add_argument("--diagnostic-log", type=Path, help="Save rejected plans and reviews for debugging (may include filter values)")
+    parser.add_argument("--case-index", type=int, action="append", help="Run selected zero-based development cases only")
+    args = parser.parse_args()
+    if args.diagnostic_log:
+        args.diagnostic_log.parent.mkdir(parents=True, exist_ok=True)
+        logging.basicConfig(filename=args.diagnostic_log, encoding="utf-8", level=logging.INFO)
+    asyncio.run(evaluate(args))

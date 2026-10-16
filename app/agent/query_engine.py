@@ -1,5 +1,6 @@
 """Composable read-only relational operations; never executes model-generated code."""
 import math
+import copy
 import re
 from pathlib import PurePosixPath
 from typing import Literal
@@ -15,6 +16,8 @@ FIELDS = {
 }
 BASE_FIELDS = {"name", "extension", "kind", "visible", "path"}
 FILE_FIELDS = {"size_bytes", "modified_at"}
+FIELD_LABELS = {"name": "이름", "size_bytes": "파일 크기(바이트)", "extension": "확장자", "kind": "종류",
+                "visible": "표시 여부", "path": "경로", "modified_at": "수정 시각(Unix 초)"}
 
 
 class Strict(BaseModel):
@@ -42,6 +45,7 @@ class Query(Strict):
     where: list[Predicate] = Field(max_length=8)
     select: list[str] = Field(min_length=1, max_length=8)
     order_by: list[Sort] = Field(max_length=3)
+    offset: int = Field(default=0, ge=0, le=1000, description="Rows to skip after filtering and sorting; Nth item uses N-1")
     limit: int = Field(ge=1, le=1000)
     aggregate: Aggregate | None
     group_by: str | None
@@ -59,6 +63,15 @@ class QueryError(ValueError):
     pass
 
 
+def select_positions(rows, numbers):
+    """Select 1-based displayed row numbers without filtering or reindexing."""
+    if not rows:
+        raise QueryError("조회 목록이 비어 있습니다. 레이어 목록을 다시 조회해 주세요.")
+    if not numbers or any(type(number) is not int or number < 1 or number > len(rows) for number in numbers):
+        raise QueryError(f"목록 번호는 1~{len(rows)} 사이로 지정해 주세요. 이번에는 열지 않았습니다.")
+    return [rows[number - 1] for number in dict.fromkeys(numbers)]
+
+
 def schema(model):
     document = model.model_json_schema()
     definitions = document.pop("$defs", {})
@@ -68,7 +81,23 @@ def schema(model):
                 return expand(definitions[value["$ref"].split("/")[-1]])
             return {key: expand(item) for key, item in value.items()}
         return [expand(item) for item in value] if isinstance(value, list) else value
-    return expand(document)
+    expanded = expand(document)
+    if model is Query:
+        expanded["required"] = list(dict.fromkeys(expanded["required"] + ["offset"]))
+        # Separate mutually exclusive result shapes at generation time. The model
+        # cannot combine file identities with a scalar aggregate or sort that
+        # aggregate by an original data field. Python still validates every plan.
+        rows, aggregate = copy.deepcopy(expanded), copy.deepcopy(expanded)
+        rows["properties"]["aggregate"] = {"type": "null"}
+        rows["properties"]["group_by"] = {"type": "null"}
+        aggregate["properties"]["aggregate"] = expand(definitions["Aggregate"])
+        aggregate["properties"]["select"]["items"] = {"type": "string", "enum": ["group", "value"]}
+        aggregate["properties"]["order_by"]["items"]["properties"]["field"] = {"type": "string", "enum": ["group", "value"]}
+        for branch in (rows, aggregate):
+            # Decide result shape before choosing projection and ordering.
+            branch["properties"] = {"aggregate": branch["properties"].pop("aggregate"), **branch["properties"]}
+        return {"anyOf": [rows, aggregate]}
+    return expanded
 
 
 def validate_query(query, available):
@@ -84,6 +113,8 @@ def validate_query(query, available):
         if predicate.operator == "contains" and predicate.field not in {"name", "path", "extension", "kind"}:
             raise QueryError("문자열 포함 비교는 문자열 필드에만 사용할 수 있습니다.")
     if query.aggregate:
+        if query.offset and not query.group_by:
+            raise QueryError("단일 집계값에는 시작 위치를 지정할 수 없습니다.")
         if query.aggregate.field != "*" and query.aggregate.field not in available:
             raise QueryError("집계 대상은 원본 데이터 필드여야 합니다.")
         if query.aggregate.function != "count" and query.aggregate.field not in FILE_FIELDS:
@@ -144,7 +175,7 @@ def execute(query, rows, available):
         warnings = []
         if excluded:
             fields = sorted(set().union(*excluded.values()))
-            warnings.append(f"{len(excluded)}개 레이어의 연산에 필요한 정보({', '.join(fields)})를 확인하지 못해 제외했습니다. "
+            warnings.append(f"{len(excluded)}개 레이어의 연산에 필요한 정보({', '.join(FIELD_LABELS.get(field, field) for field in fields)})를 확인하지 못해 제외했습니다. "
                             "결과는 확인된 데이터 기준이며, 전체 대상의 개수·순위·계산값은 확정할 수 없습니다.")
         if missing_display:
             warnings.append(f"결과 {missing_display}행의 일부 값은 확인 불가입니다.")
@@ -184,14 +215,15 @@ def execute(query, rows, available):
         for order in reversed(query.order_by):
             name = "group" if order.field == query.group_by else order.field
             records.sort(key=lambda row: (row[name] is not None, row[name]), reverse=order.direction == "desc")
-        return {"count": len(selected), "rows": selected, "records": records[:query.limit], "aggregate": operation.model_dump(), "truncated": len(records) > query.limit, **quality(records)}
+        page = records[query.offset:query.offset + query.limit]
+        return {"count": len(selected), "rows": selected, "records": page, "aggregate": operation.model_dump(), "truncated": len(records) > len(page), **quality(page)}
     selected = known(selected, {order.field for order in query.order_by})
     try:
         for order in reversed(query.order_by):
             selected.sort(key=lambda row: row[order.field], reverse=order.direction == "desc")
     except TypeError as exc:
         raise QueryError("정렬 필드의 자료형이 일치하지 않습니다.") from exc
-    chosen = selected[:query.limit]
+    chosen = selected[query.offset:query.offset + query.limit]
     records = [{name: row.get(name) for name in query.select} for row in chosen]
     return {"count": len(selected), "rows": chosen,
             "records": records,
