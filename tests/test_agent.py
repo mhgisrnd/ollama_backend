@@ -30,7 +30,7 @@ def tool_call(name="get_layer_list", args=None):
 
 
 def make_client(handler):
-    return TestClient(create_app(Settings(_env_file=None, ollama_model="test"), transport=httpx.MockTransport(handler)))
+    return TestClient(create_app(Settings(_env_file=None, ollama_model="test", agent_mode="native"), transport=httpx.MockTransport(handler)))
 
 
 def test_real_ws_roundtrip_with_mocked_model():

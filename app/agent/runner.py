@@ -31,8 +31,16 @@ do not repeat all file paths. Never claim that a tool ran unless a tool result p
 class AgentRunner:
     def __init__(self):
         self.busy = set()
+        from app.agent.structured import StructuredAgent
+        self.structured = StructuredAgent(self.busy)
+        from app.agent.general import GeneralAgent
+        self.general = GeneralAgent(self.busy)
 
     async def run(self, state, body):
+        if state.settings.agent_mode == "general":
+            return await self.general.run(state, body)
+        if state.settings.agent_mode == "structured":
+            return await self.structured.run(state, body)
         if body.client_id in self.busy:
             raise ExecutionError(409, "agent_busy", "해당 프로그램의 AI 요청이 진행 중입니다.")
         connection = state.connections.connections.get(body.client_id)

@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Literal
 
 from pydantic import Field, HttpUrl
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -19,7 +20,8 @@ class Settings(BaseSettings):
     agent_timeout_seconds: float = Field(default=240, ge=10, le=600)
     registry_database_path: Path = PROJECT_ROOT / "data" / "registry.sqlite3"
     ollama_base_url: HttpUrl = HttpUrl("http://127.0.0.1:11434")
-    ollama_model: str = Field(default="qwen3:4b", min_length=1, pattern=r"^\S+$")
+    ollama_model: str = Field(default="qwen2.5:3b", min_length=1, pattern=r"^\S+$")
+    agent_mode: Literal["general", "structured", "native"] = "structured"
     ollama_timeout_seconds: float = Field(default=120, gt=0, le=600)
     ollama_num_ctx: int = Field(default=4096, ge=512, le=32768)
     ollama_num_predict: int = Field(default=512, ge=1, le=4096)

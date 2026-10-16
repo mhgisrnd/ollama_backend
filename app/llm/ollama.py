@@ -61,9 +61,13 @@ class OllamaClient:
             "models": names,
         }
 
-    async def chat(self, messages: list[dict[str, Any]], tools: list[dict] | None = None) -> dict[str, Any]:
+    async def chat(self, messages: list[dict[str, Any]], tools: list[dict] | None = None,
+                   response_schema: dict | None = None) -> dict[str, Any]:
+        if tools is not None and response_schema is not None:
+            raise ValueError("Use native tools or a structured plan, not both")
         outgoing = [dict(message) for message in messages]
-        if self.settings.ollama_disable_thinking and self.settings.ollama_model.split(":")[0] == "qwen3":
+        if (self.settings.ollama_disable_thinking and self.settings.ollama_model.split(":")[0] == "qwen3"
+                and "instruct" not in self.settings.ollama_model.partition(":")[2]):
             # Qwen's prompt-level switch also supports templates that retain a think prefix.
             for message in reversed(outgoing):
                 if message.get("role") == "user":
@@ -78,6 +82,9 @@ class OllamaClient:
             body["think"] = False
         if tools is not None:
             body["tools"] = tools
+            body["options"]["temperature"] = 0
+        if response_schema is not None:
+            body["format"] = response_schema
             body["options"]["temperature"] = 0
         try:
             # Includes queue waiting; requests are not retried automatically.

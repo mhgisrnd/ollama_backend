@@ -11,6 +11,7 @@ class AgentChatRequest(ChatRequest):
         "client_id": "연결 목록의 client_id", "messages": [{"role": "user", "content": "현재 레이어 목록을 알려줘"}],
     }})
     client_id: ClientId
+    session_id: str | None = Field(default=None, min_length=1, max_length=64, pattern=r"^[a-zA-Z0-9_-]+$")
 
 
 class AgentToolResult(ToolResult):
@@ -24,3 +25,5 @@ class AgentChatResponse(ChatResponse):
     requested_tools: list[str] = Field(default_factory=list)
     missing_tools: list[str] = Field(default_factory=list)
     completion_status: Literal["completed", "partial", "failed", "unverified"] = "unverified"
+    session_id: str | None = None
+    query_result: dict | None = None

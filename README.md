@@ -12,9 +12,47 @@
 
 Ollama 연결 확인, 비스트리밍 채팅, 프로그램별 도구 목록 등록·조회·형식 검증을 제공합니다.
 WebSocket으로 연결된 벡터 프로그램의 레이어 조회·Photoshop ping을 직접 테스트할 수 있습니다.
-읽기 전용 두 도구의 LLM 선택을 제공합니다. 영상 편집 자동화, 사용자 인증·세션 저장은 아직 구현하지 않았습니다.
-기존 `C:\workspace\spatial_editor_tool`의 코드나 환경을 사용하거나 변경하지 않습니다.
+읽기 전용 레이어 조건 조회와 Photoshop 통신 확인을 제공합니다. 영상 편집 자동화, 사용자 인증·세션 영구 저장은 아직 구현하지 않았습니다.
+백엔드는 기존 `C:\workspace\spatial_editor_tool`의 실행 환경에 의존하지 않습니다. 채팅 UI와 실행 클라이언트는 해당 별도 프로젝트에 구현합니다.
 별도 웹 UI는 만들지 않으며 `/docs`는 개발용 API 문서입니다.
+
+## 현재 채팅 방식: 3B 구조화 조회
+
+범용 조회 엔진은 별도의 `general` 모드로 추가했습니다. 아래 `structured` 기본 채팅은 이전 구현이며, 범용 모드는 모델의 의도 해석 정확도가 아직 기준에 미달해 기본값으로 전환하지 않았습니다. 상세 설계와 검증은 다음 절을 참고하세요.
+
+기본 설정은 `LLM_SERVER_OLLAMA_MODEL=qwen2.5:3b`, `LLM_SERVER_AGENT_MODE=structured`입니다. 모델은 기능 선택과 JSON 조회 조건 생성만 담당하고, 필터링·개수 계산·최종 상태 문장은 Python이 처리합니다. 기존 방식은 `AGENT_MODE=native`로 선택할 수 있습니다.
+
+- `현재 레이어 목록 알려줘` → 최신 전체 조회
+- `그중 tif는 몇 개야?` → 직전 결과에서 TIFF 개수 계산
+- `그중 숨겨진 것만 이름을 보여줘` → 직전 결과에 숨김 조건 적용
+- `전체 레이어에서 shp만 이름을 알려줘. 표시 여부는 상관없어.` → 최신 전체 대상에서 조건 변경
+- `조건을 초기화하고 지금 전체 레이어 목록을 다시 확인해줘` → 새 조회
+- `레이어 목록과 포토샵 연결 상태 알려줘` → 두 기능의 실제 결과 반환
+
+조건은 현재 TIFF(`.tif`·`.tiff`), SHP(`.shp`), 표시 여부, 개수·목록을 지원합니다. 모든 자연어 표현의 정확성을 보장하지는 않습니다. 명시적인 개수·숨김 조건과 충돌하는 계획은 실행 전에 한 번 보정하며, 보정 실패 시 실행하지 않습니다. 질문 표현별 실행 코드를 추가하는 방식은 아닙니다.
+
+POST `/api/v1/agent/chat`에는 기존 `client_id`, `messages`에 더해 선택적인 `session_id`가 있습니다. 같은 대화는 같은 ID, 새 대화는 새 ID를 사용합니다. 벡터 UI가 자동 관리합니다. `session_id` 생략 시 단일 요청이며 후속 조회 결과를 보관하지 않습니다.
+
+세션은 프로그램별로 격리하고 최대 128개, 유효 기간 30분으로 메모리에만 보관합니다. 서버 재시작·프로그램 연결 변경 시 이전 결과를 재사용하지 않습니다. UI의 새 대화·프로젝트 경로 변경도 조회 맥락을 초기화합니다. 직전 결과는 조회 시점 스냅샷이며 실제 레이어가 바뀌면 현재 상태를 다시 조회해야 합니다.
+
+조건 결과는 `query_result`에, 실제 실행 내역은 `tool_results`에 반환합니다. `query_layers`는 서버의 내부 계산 도구이며, 현재 데이터가 필요할 때만 기존 클라이언트 `get_layer_list`를 호출합니다. 클라이언트 MCP 도구 목록을 바꿀 필요는 없습니다. 일부 데이터만 수신하면 전체 개수를 추측하지 않습니다. 개수 응답에는 전체 목록을 표시하지 않습니다.
+
+모듈: `app/agent/structured.py`(계획·세션·실행), `app/agent/layer_query.py`(스키마·계산), `app/llm/ollama.py`(모델 어댑터). 기능 확장 시 입력 명세·검증·실행기·응답 처리를 함께 추가합니다. 임의 코드 실행은 지원하지 않습니다.
+
+반영 후 백엔드와 벡터 프로그램을 모두 재실행하세요. Ollama가 실행 중이고 모델이 설치되어 있어야 합니다.
+
+```powershell
+.\.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
+
+# 실제 Ollama + 운영 에이전트 + 합성 데스크톱 데이터 검증 (벡터/포토샵 수정 없음)
+.\.venv\Scripts\python.exe -m app.experiments.evaluate_structured_agent
+```
+
+2026-10-16 최종 연결 로직은 합성 데이터의 후속 질문 10개와 첫 질문 복합 조회 3개, 총 13/13을 통과했습니다. 예열된 모델과 Python 계산은 단일 조회 약 0.4~1.3초, 복합 조회 약 1.5~2초였습니다. 실제 GUI·배포 GPU 성능이나 모든 질문에 대한 정확도 보장은 아닙니다. 자동 검증은 백엔드 57개, 벡터 UI·연결 관련 31개가 통과했습니다.
+
+`현재 레이어 목록은 어떻고 그중 tif는 몇개인지 알려줘`처럼 목록과 개수를 한 번에 요청할 수도 있습니다. 여러 출력이 필요한 요청은 LLM이 최대 3개의 작은 조회 질문으로 나누고, 기존 단일 조회 계획 생성기를 재사용합니다. 전체 계획 검증 후 순서대로 실행하므로 첫 질문 안의 `그중`도 앞 단계 결과를 대상으로 처리할 수 있습니다. 단독 `그중 tif는 몇 개야?`에 이전 결과가 없을 때는 임의로 새 전체 조회를 만들지 않습니다.
+
+같은 요청의 최신 조회 단계들은 한 번 수신한 동일 스냅샷을 공유합니다. 첫 단계가 무조건 전체 목록일 때 두 번째 단계의 `current`와 `previous_result`는 이 스냅샷에서 같은 집합을 가리키므로 복합 조회 검증은 결과·전체 목록·실제 원격 조회 1회 여부로 판정합니다. 필터된 첫 결과를 대상으로 하는 일반 후속 질문은 계속 `previous_result`를 검증합니다. 여러 목록이 있으면 UI에서 각각 별도 목록 링크로 표시합니다.
 
 ## 환경
 
@@ -133,8 +171,7 @@ Ollama가 추론을 담당하고, 백엔드가 대화·도구 선택·작업 전
 
 ### Ollama 준비
 
-이 PC에서는 실행 중인 Ollama와 `qwen2.5:0.5b` 모델을 확인했습니다.
-로컬 `.env`는 이 모델로 설정했습니다. 이 모델은 연결 검증용이며 편집 도구 선택 품질은 검증하지 않았습니다.
+현재 로컬 `.env`의 모델은 `qwen2.5:3b`입니다. 초기 연결 검증에는 `qwen2.5:0.5b`를 사용했으며 조건 조회에서 정확도가 부족했습니다.
 새 서버에서는 [Ollama Windows](https://ollama.com/download/windows)를 설치하고 다음을 확인합니다.
 
 ```powershell
@@ -148,20 +185,21 @@ Ollama 앱을 실행하면 기본적으로 백그라운드 API가 시작됩니�
 이미 API가 실행 중이면 `ollama serve`를 중복 실행하지 않습니다.
 백엔드는 Ollama 프로세스를 시작·종료하거나 모델을 자동 다운로드하지 않습니다.
 
-6GB VRAM 서버에서 다음 단계의 모델 후보로 `qwen3:4b`를 사용할 경우:
+현재 사용 모델을 설치하려면:
 
 ```powershell
-ollama pull qwen3:4b
+ollama pull qwen2.5:3b
 ```
 
-다운로드 후 `.env`의 모델 값을 `qwen3:4b`로 변경하고 FastAPI를 재시작합니다.
+다운로드 후 `.env`의 모델 값을 `qwen2.5:3b`로 설정하고 FastAPI를 재시작합니다.
 모델 다운로드 크기와 실제 VRAM 사용량은 다르며, Photoshop과 함께 실행하는 자원 검증은 별도입니다.
 
 ### 백엔드 환경 설정
 
 ```dotenv
 LLM_SERVER_OLLAMA_BASE_URL=http://127.0.0.1:11434
-LLM_SERVER_OLLAMA_MODEL=qwen2.5:0.5b
+LLM_SERVER_OLLAMA_MODEL=qwen2.5:3b
+LLM_SERVER_AGENT_MODE=structured
 LLM_SERVER_OLLAMA_TIMEOUT_SECONDS=120
 LLM_SERVER_OLLAMA_NUM_CTX=4096
 LLM_SERVER_OLLAMA_NUM_PREDICT=512
@@ -171,7 +209,7 @@ LLM_SERVER_OLLAMA_KEEP_ALIVE=5m
 | 설정 | 의미 |
 |---|---|
 | `OLLAMA_BASE_URL` | `LLM_SERVER_` 접두사를 붙여 사용. Ollama 주소이며 `/api`는 붙이지 않음 |
-| `OLLAMA_MODEL` | `ollama list`에 나오는 모델 이름. 예시 파일 기본값은 `qwen3:4b` |
+| `OLLAMA_MODEL` | `ollama list`에 나오는 모델 이름. 기본값은 `qwen2.5:3b` |
 | `OLLAMA_TIMEOUT_SECONDS` | 채팅 대기 시간과 추론을 합친 최대 시간; HTTP 요청 제한에도 사용 |
 | `OLLAMA_NUM_CTX` | 컨텍스트 토큰 수; 초기값 4096 |
 | `OLLAMA_NUM_PREDICT` | 최대 생성 토큰 수; 초기값 512 |
@@ -220,7 +258,7 @@ Invoke-RestMethod -Uri 'http://127.0.0.1:8000/api/v1/chat' -Method Post -Content
 추론은 프로세스 내에서 한 번에 하나씩 처리합니다. 지금은 Uvicorn **단일 worker**로 실행합니다.
 대기 중인 요청도 설정한 시간이 지나면 종료되며, 자동 재시도하지 않습니다.
 타임아웃·취소 후 Ollama 내부 추론이 즉시 멈춘다고 보장하지 않습니다.
-다중 사용자 인증·세션 저장·영속 작업 큐·스트리밍·WebSocket·Tool Calling은 이후 단계입니다.
+일반 `/chat`은 대화를 저장하지 않습니다. WebSocket 실행과 에이전트 도구 호출은 아래 별도 API에서 제공합니다. 인증·세션 영구 저장·영속 작업 큐·스트리밍은 이후 단계입니다.
 메시지는 최대 32개, 각 내용은 최대 16,000자이며 실제 컨텍스트 예산은 토큰 수에 따라 달라집니다.
 현재 채팅 API는 이미지나 도구 호출을 받지 않습니다. 도구 정의 등록은 아래의 별도 API를 사용합니다.
 
@@ -477,7 +515,7 @@ Swagger는 WebSocket 자체 입력 UI를 제공하지 않으므로 **POST 실행
 3. `/api/v1/ollama/status`에서 현재 `.env`의 모델이 설치되어 있는지 확인합니다.
 
 설치되어 있는 `qwen2.5:0.5b`는 연결 확인용으로는 동작하지만, 실제 한국어 테스트에서 도구 선택 오류가 관찰되었습니다.
-Tool Calling의 지원 표시와 실제 선택 품질은 다릅니다. 도구 선택 검증에는 `qwen3:4b`를 후보로 권장합니다.
+Tool Calling의 지원 표시와 실제 선택 품질은 다릅니다. 현재 기본은 위의 3B 구조화 방식이며, 아래 설명은 이전 native 방식의 참고입니다.
 이 모델의 6GB GPU·Photoshop 동시 실행 성능은 별도 실측해야 합니다. 모델을 자동 다운로드하거나 `.env`를 덮어쓰지 않습니다.
 
 ```powershell
@@ -544,7 +582,7 @@ Photoshop 연결 상태를 바꾸거나 이미지 편집을 수행하지는 않�
 - 도구 결과를 이미 받은 뒤 최종 LLM 응답이 실패하면 HTTP 200에 실제 `tool_results`와 `warning`을 보존합니다.
 - 전체 요청 제한은 `LLM_SERVER_AGENT_TIMEOUT_SECONDS`(기본 240초)이며 시간 초과가 원격 작업 취소를 보장하지 않습니다.
 
-서버에 대화를 저장하지 않습니다. 후속 질문은 이전 user/assistant 대화와 새 질문을 messages에 함께 보내야 합니다.
+native 모드는 서버에 대화를 저장하지 않습니다. native 후속 질문은 이전 user/assistant 대화와 새 질문을 messages에 함께 보내야 합니다. structured 모드는 위의 session_id 방식으로 조회 결과를 보관합니다.
 도구의 원본 결과는 응답에 포함하되, 모델에는 레이어 이름·종류·표시 여부의 앞 30개와 총 개수 등 제한된 정보만 보냅니다.
 레이어 정보는 조회 시점의 데이터입니다. 편집·선택 영역 분석·산림 합성 도구는 아직 연결하지 않았습니다.
 
@@ -598,3 +636,136 @@ Photoshop 연결 상태를 바꾸거나 이미지 편집을 수행하지는 않�
 최신 문장만으로 식별되는 레이어 조회·Photoshop 연결 확인은 도구 선택 시 이전 대화의 성공 문장을 제외합니다. 인자가 없는 두 조회 도구에 한정된 처리이며, 이전 답변을 현재 상태로 오인하는 소형 모델의 연속 질문 문제를 줄입니다. 채팅창의 대화 기록은 유지하며, 요청 범위를 식별하지 못하는 일반 대화는 기존처럼 이력을 전달합니다.
 
 Uvicorn 콘솔의 `Agent start/end`, `Agent tool start/end`, `Ollama acquired/response/timeout` 로그로 요청·도구 소요 시간과 모델 대기 시간을 구분할 수 있습니다. Ollama 시간 초과의 `phase=queue`는 서버 내 순서 대기, `phase=generation`은 Ollama HTTP 응답 대기입니다. 질문 본문과 레이어 경로는 이 로그에 기록하지 않습니다. 서버의 HTTP 대기가 끝나도 Ollama 내부 생성의 즉시 종료까지 보장하지는 않습니다.
+
+### 조건 조회·후속 질문 검증 (기존 채팅에 미적용)
+
+`app/experiments/`는 범용 레이어 조회와 세션 맥락의 실험 모듈입니다. FastAPI 라우터나 벡터 프로그램에 연결하지 않았습니다. 기존 채팅·Photoshop MCP·서버 모델 설정을 변경하지 않습니다.
+
+- `layer_query.py`: 엄격한 입력 스키마, Python 필터링·개수 계산, 세션별 직전 결과 보관. count 응답에서도 후속 필터링용 원본 행을 유지합니다.
+- `evaluate_layer_query.py`: 현재 Ollama 모델의 도구 인자 선택 및 JSON 스키마 출력 방식 비교. 모델 답변을 정답으로 간주하지 않고 별도의 기대 결과와 비교합니다.
+- 알려진 TIFF·SHP·GeoJSON 6개를 사용합니다. 전체 목록 → 그중 TIFF 개수 → 그중 숨김 이름 → 전체에서 SHP → 조건 초기화·재조회, 5개 질문을 반복합니다. 마지막 조회에서는 테스트 데이터를 하나 추가해 이전 결과 재사용과 새 조회를 구분합니다.
+- `--context reference`는 올바른 이전 상태를 제공해 앞선 실패의 전파와 현재 질문 자체의 해석 오류를 구분합니다. 기대 정답은 모델에 전달하지 않습니다. 이전 정답 맥락만 전달합니다.
+
+Ollama를 실행한 상태에서 프로젝트 루트에서 실행합니다. 벡터 프로그램 없이 실행할 수 있습니다.
+
+```powershell
+# 기본 Tool Calling, 실제 모델 응답을 다음 질문의 맥락으로 사용
+.\.venv\Scripts\python.exe -m app.experiments.evaluate_layer_query --repeat 2
+
+# 올바른 이전 맥락을 제공한 Tool Calling
+.\.venv\Scripts\python.exe -m app.experiments.evaluate_layer_query --context reference --report data/evaluations/layer_query_reference.json
+
+# JSON 스키마 출력 강제 방식 비교
+.\.venv\Scripts\python.exe -m app.experiments.evaluate_layer_query --mode structured-json --report data/evaluations/layer_query_structured.json
+.\.venv\Scripts\python.exe -m app.experiments.evaluate_layer_query --mode structured-json --context reference --report data/evaluations/layer_query_structured_reference.json
+```
+
+`--model <ollama에 설치된 모델명>`으로 실험 모델만 바꿀 수 있습니다. 모델을 자동 다운로드하지 않습니다. 결과 JSON은 Git에서 제외된 `data/evaluations/`에 저장됩니다.
+
+선택적으로 `--backend-url http://127.0.0.1:8000 --client-id <연결된_ID>`를 붙이면 기존 읽기 전용 도구로 실제 레이어 스냅샷을 한 번 가져옵니다. 그 이후는 스냅샷에서 로컬 계산만 합니다. 이 모드는 최신 상태 재조회·실시간 편집 반영 검증이 아니며 보고서에 이 제한을 표시합니다. 실제 경로는 모델이나 보고서에 전달하지 않습니다.
+
+2026-10-16 검증 결과 (`qwen2.5:0.5b`, 최종 프롬프트, 합성 데이터):
+
+| 방식 | 실제 이전 응답 사용 | 올바른 이전 맥락 제공 |
+|---|---:|---:|
+| Tool Calling | 0/10 | 0/10 |
+| JSON 스키마 강제 | 0/10 | 0/10 |
+
+Tool Calling에서는 필수 인자 누락·호출 생략, JSON 방식에서는 질문과 다른 확장자·표시 여부·조회 대상 선택이 반복됐습니다. 초기 JSON 프롬프트에서는 4/10이었으나 설명 변경 후 0/10이 되어 프롬프트 민감성도 확인했습니다. 이 작은 고정 시나리오는 모델 전체 성능 점수가 아니며 temperature=0 반복은 독립적인 정확도 표본이 아닙니다. 현재 구성으로 실사용하기에는 부족하다는 근거입니다. 다른 모델도 동일 조건으로 비교한 후 적용해야 합니다.
+
+Python 실행기 회귀 테스트 8개(정확한 계산·후속 조회·신규 조회·세션 격리·잘못된 인자 거절)는 통과했습니다. 모델의 의미 해석 실패를 자동 교정하거나 성공으로 처리하지 않습니다. 현 실험은 레이어 조회 하나에 한정되며 일반 도구 선택·편집 자동화 검증을 포함하지 않습니다.
+
+동일 코드·질문으로 `qwen2.5:3b`를 비교한 결과:
+
+| 방식 | 실제 이전 응답 사용 | 올바른 이전 맥락 제공 |
+|---|---:|---:|
+| Tool Calling | 0/10 | 3/10 |
+| JSON 스키마 강제 | 8/10 | 9/10 |
+
+3B의 JSON 방식은 전체 조회, TIFF 개수, 전체에서 SHP 조회, 조건 초기화를 처리했지만 `그중 숨겨진 것만 이름을 보여줘`에서 직전 결과·숨김 조건을 누락했습니다. 예열된 JSON 방식의 모델 응답은 약 0.4~0.7초였고 전체 성공률로 일반화할 수 없는 작은 테스트입니다. 이 시간은 합성 데이터의 계획 생성 시간이며, 벡터 프로그램 통신·Photoshop 실행·배포 대상 GTX 1660의 실측 시간이 아닙니다.
+
+비교 명령 예시:
+
+```powershell
+.\.venv\Scripts\python.exe -m app.experiments.evaluate_layer_query --model qwen2.5:3b --repeat 2 --report data/evaluations/layer_query_3b.json
+.\.venv\Scripts\python.exe -m app.experiments.evaluate_layer_query --model qwen2.5:3b --mode structured-json --repeat 2 --report data/evaluations/layer_query_3b_structured.json
+```
+
+결론: 모델 크기에 따른 개선이 관찰되지만 모델만 변경하면 해결되는 것은 아닙니다. JSON 계획 검증·세션 맥락 전달 방식과 함께 보완하고 더 넓은 질문 세트에서 검증한 뒤 기존 채팅에 연결해야 합니다. 서버 `.env`와 기존 API에는 아직 적용하지 않았습니다.
+
+## 범용 조회 설계 (`general`, 개발 검증 모드)
+
+질문 문장별 예외 분기 대신 데이터 필드·공통 연산·실행 어댑터를 조합합니다. `general.py`는 질문 키워드용 정규식, `request_scope`, 문장별 count/hidden 보정 규칙을 사용하지 않습니다. 기존 `structured`/`native` 모드는 이전 동작 비교용으로 남겨 두었습니다.
+
+```text
+사용자 원문 + 세션 맥락 + 사용 가능한 도구·필드 명세
+→ LLM 작업 계획(최대 3개)
+→ 필터·정렬·집계 JSON 질의 생성
+→ Python 자료형·필드·연산 검증 + LLM 원문 의도 검토
+→ 필요하면 계획을 1회 수정, 불명확·미지원이면 실행 중단
+→ 읽기 전용 데이터 수집 → Python 계산 → 실제 값으로 답변
+```
+
+LLM의 의도 검토는 의미 해석의 수학적 보증이 아닙니다. JSON 형식이 맞더라도 질문의 의미를 놓칠 수 있으므로 별도 평가가 필요합니다. 원문을 계획·검토 단계까지 보존하고 하위 질문 요약이 조건을 누락하지 않게 합니다. 질의가 미지원 필드를 명시하면 Python이 거절합니다. 미지원 개념을 모델이 다른 필드로 바꿔 쓰는 오류는 모델 검토·실측 평가의 대상입니다.
+
+### 공통 질의 언어
+
+`app/agent/query_engine.py`가 필드와 연산의 단일 실행 경계입니다.
+
+| 구성 | 지원 내용 |
+|---|---|
+| 필드 | name, extension, kind, visible, path, size_bytes, modified_at |
+| 필터 | eq/in(값 중 하나), ne(값 모두 제외), contains, gt/ge/lt/le; 필터 사이는 AND |
+| 정렬·제한 | 다중 필드 asc/desc, 상위 N개(limit 최대 1000) |
+| 집계 | count(* 또는 비어 있지 않은 필드), sum/avg/min/max |
+| 그룹 | group_by 한 필드; 집계 결과 group/value로 정렬 가능 |
+| 맥락 | current 또는 previous_result; 서버 메모리 세션에 결과 행과 질의 보관 |
+
+예: TIFF 중 가장 큰 파일은 `extension in [.tif,.tiff] → size_bytes desc → limit 1 → name,size_bytes 선택`입니다. 이 경우의 질문 문장을 판별하는 Python 코드는 없습니다. 같은 엔진으로 상위 5개, 숨김 조건의 총용량, 종류별 개수 등을 조합합니다. 임의 Python·SQL·쉘 코드는 실행하지 않습니다. 미지원 필드/연산은 가까운 기능으로 대체하지 않고 거절합니다.
+
+숫자 비교 값에는 `100 MB`, `1 GiB` 등 명시 단위를 사용할 수 있습니다(MB=10^6, MiB=2^20 바이트). modified_at은 현재 Unix 초입니다. 해상도·좌표계·영상 내용은 현재 제공 필드가 아닙니다. 새 데이터 능력은 필드 명세와 수집 어댑터, 새 연산은 실행기를 확장합니다. 질문 표현마다 실행 분기를 늘리지 않습니다.
+
+집계는 필터된 전체 행에서 계산하며 limit는 반환 행 수를 제한합니다. 일반 목록의 후속 질문은 실제 반환된 상위 N개를, 집계의 후속 질문은 집계에 사용된 행을 대상으로 합니다. 일부 크기를 읽지 못하면 최댓값·합계를 확정하지 않습니다. null을 0으로 간주하거나 모르는 파일을 빼고 전체 최댓값이라고 답하지 않습니다.
+
+### 파일 정보 수집과 UI
+
+벡터 클라이언트에 `get_layer_metadata`를 추가했습니다. 인자는 `{}`이고 현재 로드된 레이어 경로만 조회합니다. GUI 스레드는 가벼운 메타데이터 복사만 하며, 파일 stat은 최대 4개 daemon 작업으로 수행합니다. 네트워크 경로가 멈춰도 요청당 약 5초 예산 후 미확인 값은 null로 반환하고 GUI/종료를 막지 않습니다. 기존에 멈춘 stat 작업이 있으면 새 작업을 무제한 만들지 않습니다.
+
+size_bytes는 실제 파일 하나의 크기입니다. SHP의 DBF/SHX 등 부속 파일 합계는 아닙니다. 같은 파일이 여러 레이어에 있으면 레이어별 집계로 중복될 수 있습니다. 가상 레이어·접근 불가 파일은 null입니다. 숫자 정보가 필요할 때만 수집하고, 직전 결과는 경로·종류가 같은 현재 레이어 메타데이터와 결합합니다. 이전 대상이 사라졌으면 값을 추측하지 않습니다.
+
+일반 모드 결과는 `query_result.plan`(적용 조건), `records`(선택된 열 또는 집계값), `layers`(호환 표시용)에 반환합니다. 채팅의 `조회 결과 자세히 보기`는 열을 동적으로 구성하여 파일 크기·집계 결과 등을 표시합니다. 실제 읽기 도구와 내부 계산은 `tool_results`에 따로 남깁니다. 구형 클라이언트에 파일 정보 도구가 없으면 해당 필드 요청을 거절합니다.
+
+### 실행·평가
+
+일반 모드는 아직 기본 활성화하지 않았습니다. 개발용으로 사용할 때만 `.env`를 다음처럼 설정하고 백엔드·벡터 프로그램을 재실행합니다.
+
+```dotenv
+LLM_SERVER_AGENT_MODE=general
+LLM_SERVER_OLLAMA_MODEL=qwen3:4b-instruct
+```
+
+현재 PC에는 비교용 `qwen3:4b-instruct`를 추가 설치했습니다. 기존 모델은 유지하며 기존 `.env`의 structured/3B 설정도 유지했습니다. 일반 모드의 의미 해석 정확도가 검증되기 전 기존 채팅을 자동 교체하지 않습니다.
+
+```powershell
+# 서버·실제 파일을 수정하지 않고 실제 Ollama와 합성 메타데이터로 평가
+.\.venv\Scripts\python.exe -m app.experiments.evaluate_general_agent --model qwen3:4b-instruct --report data/evaluations/general_agent_qwen3_4b_instruct.json
+
+# 공통 엔진과 API 경계 검증
+.\.venv\Scripts\python.exe -m pytest -q tests/test_query_engine.py tests/test_general_agent.py
+```
+
+크기 순위·상위 N개·합계·평균·그룹별 개수·미지원 정보·삭제 거절 등 11문항은 개발 평가 세트이며 독립된 미공개 검증 세트는 아닙니다. 점수에는 지원하지 않는 요청을 올바르게 거절한 경우도 포함됩니다. 결과를 보고 질문별 코드 예외를 추가하지 않으며, 향후 다른 표현·다른 데이터로 별도 검증해야 합니다. Ollama 응답 시간이 초과되면 평가를 중단하여 다음 요청을 무작정 쌓지 않습니다.
+
+최종 `qwen3:4b-instruct` 개발 평가: **8/11**. 지원 조회 9개 중 6개 성공, 3개 실행 전 거절, 미지원 요청 2개 올바른 거절입니다. 가장 큰 TIFF·가장 작은 TIFF·크기 조건 조회의 일부 계획은 확정하지 못했습니다. 성공한 지원 조회는 상위 N개·개수·합계·평균·그룹·이름 조건이었습니다. 이는 범용 배포 승인 기준을 충족하지 않으며 현재 기본 전환을 보류한 이유입니다. 모델 검토가 틀린 의도를 반드시 걸러 준다는 보장도 없습니다.
+
+Python 실행기와 연결·UI 자동 테스트는 총 **107개(백엔드 73, 벡터 관련 34)** 통과했습니다. 자동 테스트는 형식·계산·경계 처리 검증이며 자연어 이해 정확도 점수와 다릅니다. JSON 스키마는 형식 강제 인자뿐 아니라 모델 프롬프트에도 전달합니다([Ollama 공식 안내](https://docs.ollama.com/capabilities/structured-outputs)).
+
+### 범용 모드의 누락 정보 처리
+
+단순 목록 계획에는 필요한 기본 필드만 선택하도록 지침·검토 기준을 적용합니다. 표시용 필드가 누락되어도 레이어를 제거하지 않으며 해당 값은 JSON `null`, 채팅·상세 표에서는 `확인 불가`로 표시합니다.
+
+필터·정렬·숫자 집계에 필요한 값이 없으면 해당 행을 연산에서 제외하고, `query_result.is_partial=true`, `excluded_count`, `warnings`로 한계를 전달합니다. 응답은 `completion_status=partial`, `warning=incomplete_data`이며, 확인된 데이터 기준의 결과라고 명시합니다. 전체가 누락된 합계는 0이 아닌 `null`입니다. 부분 결과를 대상으로 한 후속 조회에도 이전 한계를 유지합니다. 따라서 확인된 파일 중 최대값을 전체 파일의 최대값으로 단정하지 않습니다.
+
+서버 콘솔의 `Query plan`, `Query result`, `Query failed` 로그로 계획과 제외 개수·실패 원인을 확인할 수 있습니다. 계획 로그에는 질문에 포함된 필터 값이 포함될 수 있습니다. 이 변경은 누락 처리 개선이며 모델의 자연어 이해 정확도를 보장하지 않습니다.
+
+`.env` 모드·모델 변경 후에는 서버를 종료하고 재시작하세요. 기존 벡터 프로그램도 재실행하면 새 안내 문구가 적용됩니다. 재시작 후 ‘새 대화’에서 목록·형식별 개수·용량 순위·후속 질문을 확인하세요.
