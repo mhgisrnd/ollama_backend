@@ -50,6 +50,26 @@ def reply(ws, name, rows=ROWS):
                   "result": {"count": len(rows), "layers": rows}})
 
 
+def test_shorthand_format_counts_share_snapshot_and_keep_independent_scopes():
+    captured = []
+    count = {"function": "count", "field": "*"}
+    tif = query(where=[TIFF], select=["value"], aggregate=count)
+    shp = query(where=[{"field": "extension", "operator": "in", "values": [".shp"]}],
+                select=["value"], aggregate=count)
+    with client_for([tasks("현재 TIFF 개수", "현재 SHP 개수"), tif.model_dump(), shp.model_dump()], captured=captured) as client:
+        register(client)
+        with client.websocket_connect(BASE + "/ws") as ws, ThreadPoolExecutor(1) as pool:
+            ws.receive_json()
+            pending = pool.submit(client.post, "/api/v1/agent/chat", json=request("tif와 shp 개수가 궁금해"))
+            reply(ws, "get_layer_list")
+            result = pending.result(timeout=5).json()
+            assert result["completion_status"] == "completed"
+            queries = [item for item in result["tool_results"] if item["tool_name"] == "query_layers"]
+            assert [item["result"]["records"][0]["value"] for item in queries] == [3, 1]
+            assert sum(item["tool_name"] == "get_layer_list" for item in result["tool_results"]) == 1
+            assert "각각" in captured[0]["messages"][-1]["content"]
+
+
 def test_largest_file_and_followup_sum_are_generic_operations():
     largest = query(where=[TIFF], select=["name", "size_bytes"], order_by=[{"field": "size_bytes", "direction": "desc"}], limit=1)
     total = query(source="previous_result", aggregate={"function": "sum", "field": "size_bytes"})

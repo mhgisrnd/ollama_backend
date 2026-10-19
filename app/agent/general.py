@@ -18,6 +18,7 @@ from app.schemas.agent import AgentChatResponse, AgentToolResult
 from app.schemas.chat import ChatMessage
 from app.schemas.execution import ToolCallRequest
 from app.agent.formatting import format_size
+from app.agent.count_request import expand_count_request
 from app.agent.photoshop import READ_TOOLS, OPEN_TOOL, IMAGE_EXTENSIONS, describe
 
 log = logging.getLogger("uvicorn.error.agent.general")
@@ -129,6 +130,9 @@ For numeric min/max only (no file identity requested), aggregate=min/max. group_
 An aggregate returns only group/value, never the original file identity. For row identity use sorting, not aggregation.
 For aggregate queries select=["group","value"] if grouped, otherwise select=["value"].
 Use group_by only when separate per-category results are explicitly requested. A filtered total count is not grouped.
+Short questions such as 'tif와 shp 개수가 궁금해' request separate counts per format, not a combined total.
+For separate TIFF and SHP counts prefer independent tasks: TIFF uses [.tif,.tiff] together, SHP uses [.shp]. Each reads current unless the user explicitly refers to previous results.
+DXF and ECW use [.dxf] and [.ecw]. A count does not require size_bytes, modified_at, or Photoshop data.
 For plain lists use aggregate=null, group_by=null. Never turn unknown fields into count or drop requested constraints.
 Use only fields required by the request. For a plain list or overview select=["name","extension","kind","visible"], not size_bytes/modified_at/path.
 Do not add sorting, file fields or filters unless required by the user's intent. Display-only missing values do not prevent listing a layer.
@@ -155,6 +159,7 @@ The metadata contract treats TIFF/tif/tiff as one image family (.tif and .tiff).
 Do not request a change when the candidate already performs the requested operation with the declared semantics.
 Check every aspect before returning repair; report all necessary changes together, including projection and grouping, not only the first problem.
 If the request is ambiguous choose clarify. Accept only a complete faithful plan with no validation errors.
+Naming multiple formats and asking their counts is sufficient to request separate per-format counts; do not require the user to say '각각'. An explicit combined total overrides this default.
 Reason must be short Korean. Return only the review JSON schema."""
 
 OPEN_REVIEW = """Validate the ARGUMENT SELECTION for an image-open operation.
@@ -294,6 +299,7 @@ class GeneralAgent:
                 question = next((message.content for message in reversed(body.messages) if message.role == "user"), "")
                 if not question:
                     raise QueryError("사용자 질문이 필요합니다.")
+                question = expand_count_request(question)
                 catalog = await asyncio.to_thread(state.registry.get_tools, body.client_id)
                 available_tools = {tool.name for tool in catalog.tools}
                 available_fields = BASE_FIELDS | (FILE_FIELDS if "get_layer_metadata" in available_tools else set())

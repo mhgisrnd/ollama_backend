@@ -14,6 +14,7 @@ from typing import Literal, Annotated
 from pydantic import BaseModel, ConfigDict, ValidationError, Field
 
 from app.agent.coverage import request_scope
+from app.agent.count_request import expand_count_request
 from app.agent.layer_query import LayerQuery, QuerySession, inline_schema
 from app.execution.connections import ExecutionError
 from app.llm.ollama import OllamaError
@@ -87,6 +88,7 @@ Preserve every requested output. A full list followed by a filtered count must b
 Do not apply the second question's filter to the first full-list request.
 Use '그중' in a question referring to the prior output. Do not answer or invent tasks.
 Only split layer queries. Omit Photoshop requests; a separate tool handles them.
+Separate per-format counts must become one question per format, each using current unless the user says previous results. TIFF includes .tif and .tiff together. An explicit combined total remains one question.
 Return only the questions array in JSON."""
 
 
@@ -155,6 +157,8 @@ class StructuredAgent:
                 latest = next((message.content for message in reversed(body.messages) if message.role == "user"), "")
                 if not latest:
                     raise ExecutionError(422, "missing_user_message", "사용자 질문이 필요합니다.")
+                original_latest = latest
+                latest = expand_count_request(latest)
                 expected, excluded = request_scope(body.messages)
                 # No paths or row names enter the model. Context is compact and server-owned.
                 payload = await state.ollama.chat([
@@ -170,7 +174,8 @@ class StructuredAgent:
                     queries = []
                     if "query_layers" in routing.operations:
                         wants_count = bool(re.search(r"몇|개수|갯수|\bcount\b|how many", latest, re.I))
-                        multiple_outputs = wants_count and bool(re.search(r"목록|이름|\blist\b|\bnames\b", latest, re.I))
+                        multiple_outputs = wants_count and (bool(re.search(r"목록|이름|\blist\b|\bnames\b", latest, re.I))
+                            or (latest != original_latest and "각각" in latest))
                         questions = [latest]
                         if multiple_outputs:
                             split = await state.ollama.chat([
