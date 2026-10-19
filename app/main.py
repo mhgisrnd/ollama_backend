@@ -16,6 +16,7 @@ from app.execution.connections import ConnectionManager, ExecutionError
 from app.api.execution import router as execution_router
 from app.agent.runner import AgentRunner
 from app.api.agent import router as agent_router
+from app.agent.cancellation import AgentRequests
 
 
 def create_app(settings: Settings | None = None, *, transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
@@ -45,6 +46,7 @@ def create_app(settings: Settings | None = None, *, transport: httpx.AsyncBaseTr
     application.state.settings = settings
     application.state.connections = ConnectionManager()
     application.state.agent = AgentRunner()
+    application.state.agent_requests = AgentRequests()
     application.include_router(router)
     application.include_router(ollama_router)
     application.include_router(chat_router)

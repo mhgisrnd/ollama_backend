@@ -1,4 +1,6 @@
 from fastapi import APIRouter, Request
+from pydantic import BaseModel, ConfigDict, Field
+from app.schemas.registry import ClientId
 
 from app.schemas.agent import AgentChatRequest, AgentChatResponse
 
@@ -14,4 +16,16 @@ async def agent_chat(body: AgentChatRequest, request: Request):
     서버 재시작·연결 변경·30분 경과 시 결과가 만료됩니다. session_id 생략 시 단일 요청으로 처리합니다.
     편집 및 대화 영구 저장은 제공하지 않습니다. 계산 결과는 query_result에서 확인하세요.
     """
-    return await request.app.state.agent.run(request.app.state, body)
+    return await request.app.state.agent_requests.run(request.app.state, body)
+
+
+class CancelRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    client_id: ClientId
+    request_token: str = Field(pattern=r"^[a-f0-9]{32}$")
+
+
+@router.post("/cancel", summary="진행 중인 AI 요청 중지")
+async def cancel_agent(body: CancelRequest, request: Request):
+    """LLM 대기와 후속 도구 실행을 중지합니다. 이미 전달한 프로그램 작업은 되돌리지 않습니다."""
+    return await request.app.state.agent_requests.cancel(body.client_id, body.request_token)
