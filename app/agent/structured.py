@@ -63,7 +63,7 @@ SYSTEM = """사용자의 최신 레이어 조회 질문을 조회 인자 JSON으
 source=current는 전체 레이어 최신 조회, previous_result는 직전 결과 안에서 조회입니다.
 "그중"이면 previous_result를 사용하고 직전 결과에서 추가 조건을 적용합니다.
 이전과 다른 종류로 바꾸거나 최신 상태 재조회는 current입니다.
-extensions=[]는 모든 확장자, TIFF는 [".tif",".tiff"], SHP는 [".shp"]입니다.
+extensions=[]는 모든 확장자, TIFF는 [".tif",".tiff"], SHP는 [".shp"], DXF는 [".dxf"], ECW는 [".ecw"]입니다.
 visible=null은 표시 여부 전체, true는 표시된 것, false는 숨겨진 것입니다.
 개수를 물으면 output=count, 이름·목록을 물으면 output=list입니다.
 조건 변경은 최신 질문을 우선합니다. 이전 답변이나 이전 계획을 그대로 복사하지 마세요.

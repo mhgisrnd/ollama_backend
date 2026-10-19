@@ -8,7 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 class Filters(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
-    extensions: list[Literal[".tif", ".tiff", ".shp"]] = Field(max_length=3)
+    extensions: list[Literal[".tif", ".tiff", ".shp", ".dxf", ".ecw"]] = Field(max_length=5)
     visible: bool | None
 
 
