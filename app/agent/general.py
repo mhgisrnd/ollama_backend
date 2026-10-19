@@ -18,7 +18,7 @@ from app.schemas.agent import AgentChatResponse, AgentToolResult
 from app.schemas.chat import ChatMessage
 from app.schemas.execution import ToolCallRequest
 from app.agent.formatting import format_size
-from app.agent.count_request import expand_count_request
+from app.agent.count_request import expand_count_request, count_queries
 from app.agent.photoshop import READ_TOOLS, OPEN_TOOL, IMAGE_EXTENSIONS, describe
 
 log = logging.getLogger("uvicorn.error.agent.general")
@@ -299,6 +299,7 @@ class GeneralAgent:
                 question = next((message.content for message in reversed(body.messages) if message.role == "user"), "")
                 if not question:
                     raise QueryError("사용자 질문이 필요합니다.")
+                direct_counts = count_queries(question)
                 question = expand_count_request(question)
                 catalog = await asyncio.to_thread(state.registry.get_tools, body.client_id)
                 available_tools = {tool.name for tool in catalog.tools}
@@ -312,11 +313,13 @@ class GeneralAgent:
                 # Preserve incomplete-result scope for subsequent questions.
                 capabilities = {name: FIELDS[name] for name in sorted(available_fields)}
                 route_tools = available_tools | {"query_layers"} | ({"open_numbered_images"} if OPEN_TOOL in available_tools else set())
-                task_payload = await state.ollama.chat([
+                task_payload = ({"model": model, "message": {"content": json.dumps({"tasks": [
+                    {"tool": "query_layers", "request": "현재 " + "/".join(query.where[0].values) + " 개수"}
+                    for query in direct_counts]})}} if direct_counts else await state.ollama.chat([
                     {"role": "system", "content": ROUTE + "\nAvailable tools: " + json.dumps(sorted(route_tools)) + "\nOutput schema: " + json.dumps(schema(Tasks)) + "\nLayer fields: " + json.dumps(capabilities, ensure_ascii=False)},
                     {"role": "assistant", "content": json.dumps(context(), ensure_ascii=False)},
                     {"role": "user", "content": question},
-                ], response_schema=schema(Tasks))
+                ], response_schema=schema(Tasks)))
                 model = task_payload["model"]
                 tasks = Tasks.model_validate_json(task_payload["message"]["content"]).tasks
                 log.info("Query routing client=%s tasks=%s", body.client_id, [task.model_dump() for task in tasks])
@@ -387,12 +390,13 @@ class GeneralAgent:
                                            "Supported formats: " + ",".join(sorted(IMAGE_EXTENSIONS)) + ". "
                                            "First/second without a sorting criterion means current list order (order_by=[]). Never invent paths."
                                            if opening else "")
-                        plan_payload = await state.ollama.chat([
+                        plan_payload = ({"message": {"content": direct_counts[task_index].model_dump_json()}}
+                                        if direct_counts else await state.ollama.chat([
                             {"role": "system", "content": PLAN + operation_rules + "\nOutput schema: " + json.dumps(schema(Query)) + "\nAvailable fields: " + json.dumps(capabilities, ensure_ascii=False)},
                             {"role": "assistant", "content": json.dumps(context(), ensure_ascii=False)},
                             *([{"role": "user", "content": question}, {"role": "assistant", "content": "Preserve original constraints while planning the following subtask."}] if len(tasks) > 1 else []),
                             {"role": "user", "content": question if len(tasks) == 1 else task.request},
-                        ], response_schema=schema(Query))
+                        ], response_schema=schema(Query)))
                         for attempt in range(2):
                             query = None
                             problem = None
@@ -410,6 +414,12 @@ class GeneralAgent:
                                 problem = str(exc)
                             log.info("Query candidate client=%s task=%s attempt=%s candidate=%s validation=%s",
                                      body.client_id, task_index, attempt + 1, plan_payload["message"]["content"], problem)
+                            if direct_counts:
+                                if problem:
+                                    raise PlanningError(problem)
+                                # Server-compiled counts still pass schema/capability validation.
+                                # Model review cannot reinterpret this fully recognized grammar.
+                                break
                             review_payload = await state.ollama.chat([
                                 {"role": "system", "content": (OPEN_REVIEW if opening else REVIEW) + "\nQuery language capabilities: " + PLAN + operation_rules
                                  + "\nSupported query schema: " + json.dumps(schema(Query)) + "\nOutput schema: " + json.dumps(schema(Review))},

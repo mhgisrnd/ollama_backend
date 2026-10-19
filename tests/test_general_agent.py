@@ -2,6 +2,7 @@ import json
 from concurrent.futures import ThreadPoolExecutor
 
 import httpx
+import pytest
 from fastapi.testclient import TestClient
 
 from app.core.config import Settings
@@ -50,24 +51,27 @@ def reply(ws, name, rows=ROWS):
                   "result": {"count": len(rows), "layers": rows}})
 
 
-def test_shorthand_format_counts_share_snapshot_and_keep_independent_scopes():
+@pytest.mark.parametrize("text, expected", [
+    ("tif와 shp 개수가 궁금해", [3, 1]),
+    ("DXF랑 ECW 몇개야?", [0, 0]),
+    ("tif랑 shp 합쳐서 몇 개야?", [4]),
+    ("tif와 tiff 개수", [3]),
+])
+def test_shorthand_format_counts_share_snapshot_and_keep_independent_scopes(text, expected):
     captured = []
-    count = {"function": "count", "field": "*"}
-    tif = query(where=[TIFF], select=["value"], aggregate=count)
-    shp = query(where=[{"field": "extension", "operator": "in", "values": [".shp"]}],
-                select=["value"], aggregate=count)
-    with client_for([tasks("현재 TIFF 개수", "현재 SHP 개수"), tif.model_dump(), shp.model_dump()], captured=captured) as client:
+    # Any model call would exhaust the empty response iterator and fail the request.
+    with client_for([], captured=captured) as client:
         register(client)
         with client.websocket_connect(BASE + "/ws") as ws, ThreadPoolExecutor(1) as pool:
             ws.receive_json()
-            pending = pool.submit(client.post, "/api/v1/agent/chat", json=request("tif와 shp 개수가 궁금해"))
+            pending = pool.submit(client.post, "/api/v1/agent/chat", json=request(text))
             reply(ws, "get_layer_list")
             result = pending.result(timeout=5).json()
             assert result["completion_status"] == "completed"
             queries = [item for item in result["tool_results"] if item["tool_name"] == "query_layers"]
-            assert [item["result"]["records"][0]["value"] for item in queries] == [3, 1]
+            assert [item["result"]["records"][0]["value"] for item in queries] == expected
             assert sum(item["tool_name"] == "get_layer_list" for item in result["tool_results"]) == 1
-            assert "각각" in captured[0]["messages"][-1]["content"]
+            assert captured == []
 
 
 def test_largest_file_and_followup_sum_are_generic_operations():

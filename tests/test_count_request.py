@@ -1,6 +1,6 @@
 import pytest
 
-from app.agent.count_request import expand_count_request
+from app.agent.count_request import expand_count_request, count_queries
 
 
 @pytest.mark.parametrize("text", ["tif와 shp 개수가 궁금해", "DXF랑 ECW 몇개야?", ".tif, .shp 개수", "현재 tif하고 shp 개수 알려줘"])
@@ -21,3 +21,5 @@ def test_explicit_total_is_preserved(text):
 ])
 def test_unknown_constraints_and_other_operations_are_not_rewritten(text):
     assert expand_count_request(text) == text
+    if text != "tif와 tiff 개수":
+        assert count_queries(text) == []
