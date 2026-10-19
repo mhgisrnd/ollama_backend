@@ -147,10 +147,9 @@ Check the requested output (identity, ordering/top-N, count, total, average, gro
 all filters, units, and previous-result scope. Use only the declared available capabilities.
 Check ordinal positions separately from counts: Nth one requires offset=N-1 and limit=1; top N requires offset=0 and limit=N.
 Reject unnecessary file fields or ordering for a plain list; prefer the minimum information needed to fulfill the request.
-Evaluate the current task within the whole task plan; another task may cover another requested output.
-Your ONLY responsibility is the scoped layer subtask in request. The original_request is context, not additional work for this query.
-Other tasks are executed separately. Never require a layer query to include Photoshop connectivity: photoshop_ping handles it.
-Only judge layer fields against available_fields; judge other task capabilities against available_tools.
+Your ONLY responsibility is the isolated task in request. This is the complete scope of this review.
+Other tasks are handled outside this query. Never require a layer query to execute another tool.
+Judge the query only against request, available_fields and the query schema.
 Never allow an unsupported concept in the original request to be replaced silently by a supported task.
 If a requested concept needs unavailable information, choose unsupported; do not substitute another field.
 If the query drops constraints or uses the wrong operation, choose repair and explain how to preserve the original request.
@@ -405,6 +404,7 @@ class GeneralAgent:
                         parts.append("포토샵 통신에 성공했습니다." if data.get("connected") is True else "포토샵 통신 성공을 확인하지 못했습니다.")
                     else:
                         opening = task.tool == OPEN_TOOL
+                        scoped_request = task.request if len(tasks) > 1 else question
                         operation_rules = ("\nThis subtask explicitly opens images in Photoshop. Produce ONLY a nonaggregate query selecting target image rows. "
                                            "Use name/path as selection columns. Apply the requested filters, ordering, offset and limit. "
                                            "Do not change a requested batch count to fit limits; a maximum of 5 targets is enforced by the executor. "
@@ -446,11 +446,9 @@ class GeneralAgent:
                                 {"role": "system", "content": (OPEN_REVIEW if opening else REVIEW) + "\nQuery language capabilities: " + PLAN + operation_rules
                                  + "\nSupported query schema: " + json.dumps(schema(Query)) + "\nOutput schema: " + json.dumps(schema(Review))},
                                 {"role": "user", "content": json.dumps({
-                                    "request": task.request if len(tasks) > 1 else question, "original_request": question,
-                                    "current_task": task.request,
+                                    "request": scoped_request, "original_request": scoped_request,
                                     "execution_operation": task.tool,
-                                    "task_index": task_index, "task_plan": [value.model_dump() for value in tasks],
-                                    "available_fields": capabilities, "available_tools": sorted(available_tools), "session": context(),
+                                    "available_fields": capabilities, "session": context(),
                                     "candidate": query.model_dump() if query else plan_payload["message"]["content"],
                                     "validation_error": problem,
                                 }, ensure_ascii=False)},

@@ -248,6 +248,6 @@ def test_compound_layer_review_is_scoped_and_photoshop_is_a_separate_task():
     review = next(value for value in captured if "decision" in value["format"].get("properties", {}))
     payload = json.loads(review["messages"][-1]["content"])
     assert payload["request"] == "현재 레이어 목록 확인"
-    assert payload["original_request"] == "레이어 목록과 포토샵 연결상태 확인해줘"
-    assert "photoshop_ping" in payload["available_tools"]
-    assert payload["task_plan"][1]["tool"] == "photoshop_ping"
+    assert payload["original_request"] == "현재 레이어 목록 확인"
+    assert "available_tools" not in payload and "task_plan" not in payload
+    assert "포토샵" not in review["messages"][-1]["content"]
