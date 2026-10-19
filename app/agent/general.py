@@ -19,6 +19,7 @@ from app.schemas.chat import ChatMessage
 from app.schemas.execution import ToolCallRequest
 from app.agent.formatting import format_size
 from app.agent.count_request import expand_count_request, count_queries
+from app.agent.query_constraints import enforce_explicit_scope
 from app.agent.photoshop import READ_TOOLS, OPEN_TOOL, IMAGE_EXTENSIONS, describe
 
 log = logging.getLogger("uvicorn.error.agent.general")
@@ -117,6 +118,7 @@ No task is executed until its tool and arguments pass validation."""
 PLAN = """Translate the layer question into a read-only relational query, not an answer.
 source=current reads current layer metadata; previous_result filters the last returned result.
 where predicates are ANDed. Values are strings, including 'true'/'false' for booleans and units for sizes.
+When visibility does not matter (표시 여부는 상관없어), omit ALL visible predicates. visible ne true means hidden only, NOT both states.
 eq/in accept one or more alternatives, ne excludes all listed alternatives. Range/contains take one value.
 TIFF includes .tif and .tiff: use extension in [".tif",".tiff"]. No extension restriction means where=[].
 select lists fields to display. order_by sorts (asc/desc); limit controls returned row count.
@@ -154,6 +156,7 @@ Never allow an unsupported concept in the original request to be replaced silent
 If a requested concept needs unavailable information, choose unsupported; do not substitute another field.
 If the query drops constraints or uses the wrong operation, choose repair and explain how to preserve the original request.
 Follow the query-language definitions literally: eq/in with multiple values means alternatives, not AND.
+Ignoring visibility requires no visible predicate; visible ne true selects only hidden rows and must never be accepted as ignoring visibility.
 The metadata contract treats TIFF/tif/tiff as one image family (.tif and .tiff). Do not remove either extension when reviewing that family.
 Do not request a change when the candidate already performs the requested operation with the declared semantics.
 Check every aspect before returning repair; report all necessary changes together, including projection and grouping, not only the first problem.
@@ -416,14 +419,18 @@ class GeneralAgent:
                                         if direct_counts else await state.ollama.chat([
                             {"role": "system", "content": PLAN + operation_rules + "\nOutput schema: " + json.dumps(schema(Query)) + "\nAvailable fields: " + json.dumps(capabilities, ensure_ascii=False)},
                             {"role": "assistant", "content": json.dumps(context(), ensure_ascii=False)},
-                            *([{"role": "user", "content": question}, {"role": "assistant", "content": "Preserve original constraints while planning the following subtask."}] if len(tasks) > 1 else []),
-                            {"role": "user", "content": question if len(tasks) == 1 else task.request},
+                            {"role": "user", "content": scoped_request},
                         ], response_schema=schema(Query)))
                         for attempt in range(2):
                             query = None
                             problem = None
                             try:
                                 query = Query.model_validate_json(plan_payload["message"]["content"])
+                                normalized = enforce_explicit_scope(query, scoped_request)
+                                if normalized != query:
+                                    log.info("Query scope correction client=%s task=%s removed unwanted visibility filter", body.client_id, task_index)
+                                    query = normalized
+                                    plan_payload["message"]["content"] = query.model_dump_json()
                                 unknown = query.fields() - available_fields - ({"group", "value"} if query.aggregate else set())
                                 if unknown:
                                     validate_query(query, available_fields)  # Unavailable fields are terminal.
@@ -467,7 +474,7 @@ class GeneralAgent:
                                     "rejected_query": query.model_dump() if query else plan_payload["message"]["content"],
                                     "review": review.reason, "validation_error": problem}, ensure_ascii=False)},
                                 {"role": "system", "content": "Repair the rejected query using the errors and original request below. Return a complete replacement query, not an explanation. Preserve the original scope and filters. If row identity is required, replace numeric aggregation with row sorting and select the identity and numeric field."},
-                                {"role": "user", "content": question if len(tasks) == 1 else task.request},
+                                {"role": "user", "content": scoped_request},
                             ], response_schema=schema(Query))
                         if query.source == "previous_result" and session.rows is None:
                             raise QueryError("이 대화에 이전 조회 결과가 없습니다. 현재 조회 대상인지 확인해 주세요.")

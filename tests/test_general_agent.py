@@ -78,6 +78,36 @@ def test_shorthand_format_counts_share_snapshot_and_keep_independent_scopes(text
             assert captured == []
 
 
+@pytest.mark.parametrize("extension", [".shp", ".tif", ".ecw", ".dxf"])
+def test_visibility_irrelevant_does_not_become_hidden_only(extension):
+    text = f"전체 레이어에서 {extension}만 이름을 알려줘. 표시 여부는 상관없어"
+    format_filter = {"field": "extension", "operator": "in", "values": [extension]}
+    candidate = query(select=["name"], where=[format_filter,
+        {"field": "visible", "operator": "ne", "values": ["true"]}])
+    rows = [
+        {"name": "shown" + extension, "path": "shown" + extension, "visible": True},
+        {"name": "hidden" + extension, "path": "hidden" + extension, "visible": False},
+        {"name": "unknown" + extension, "path": "unknown" + extension, "visible": None},
+        {"name": "other.txt", "path": "other.txt", "visible": True},
+    ]
+    captured = []
+    with client_for([tasks(text), candidate.model_dump(), candidate.model_dump()], captured=captured, reviews=[
+        {"decision": "repair", "reason": "다시 검토"}, {"decision": "accept", "reason": ""},
+    ]) as client:
+        register(client)
+        with client.websocket_connect(BASE + "/ws") as ws, ThreadPoolExecutor(1) as pool:
+            ws.receive_json()
+            pending = pool.submit(client.post, "/api/v1/agent/chat", json=request(text))
+            reply(ws, "get_layer_list", rows)
+            result = pending.result(timeout=5).json()
+            assert result["completion_status"] == "completed"
+            assert result["query_result"]["plan"]["where"] == [format_filter]
+            assert [row["name"] for row in result["query_result"]["records"]] == [row["name"] for row in rows[:3]]
+            assert result["query_result"]["excluded_count"] == 0
+    reviews = [value for value in captured if "decision" in value["format"].get("properties", {})]
+    assert all(json.loads(value["messages"][-1]["content"])["candidate"]["where"] == [format_filter] for value in reviews)
+
+
 def test_largest_file_and_followup_sum_are_generic_operations():
     largest = query(where=[TIFF], select=["name", "size_bytes"], order_by=[{"field": "size_bytes", "direction": "desc"}], limit=1)
     total = query(source="previous_result", aggregate={"function": "sum", "field": "size_bytes"})
@@ -251,3 +281,36 @@ def test_compound_layer_review_is_scoped_and_photoshop_is_a_separate_task():
     assert payload["original_request"] == "현재 레이어 목록 확인"
     assert "available_tools" not in payload and "task_plan" not in payload
     assert "포토샵" not in review["messages"][-1]["content"]
+    planning = captured[1]
+    assert planning["messages"][-1]["content"] == "현재 레이어 목록 확인"
+    assert all("포토샵" not in value["content"] for value in planning["messages"] if value["role"] == "user")
+
+
+def test_compound_query_repair_preserves_scope_and_then_checks_photoshop():
+    captured = []
+    plan = {"tasks": [{"tool": "query_layers", "request": "현재 레이어 목록 확인"},
+                      {"tool": "photoshop_ping", "request": "포토샵 연결 상태 확인"}]}
+    incorrect = query(aggregate={"function": "count", "field": "*"}, select=["value"])
+    corrected = query(select=["name", "extension", "kind", "visible"])
+    with client_for([plan, incorrect.model_dump(), corrected.model_dump()], captured=captured, reviews=[
+        {"decision": "repair", "reason": "개수가 아닌 레이어 목록이 필요합니다."},
+        {"decision": "accept", "reason": ""},
+    ]) as client:
+        register(client)
+        with client.websocket_connect(BASE + "/ws") as ws, ThreadPoolExecutor(1) as pool:
+            ws.receive_json()
+            pending = pool.submit(client.post, "/api/v1/agent/chat", json=request("현재 레이어 목록과 포토샵 연결 상태를 알려줘."))
+            reply(ws, "get_layer_list")
+            call = ws.receive_json()
+            assert call["tool_name"] == "photoshop_ping"
+            ws.send_json({"type": "tool_result", "call_id": call["call_id"], "status": "succeeded", "result": {"connected": True}})
+            result = pending.result(timeout=5).json()
+            assert result["completion_status"] == "completed"
+            assert result["missing_tools"] == []
+            assert len(result["query_result"]["records"]) == len(ROWS)
+    for payload in captured[1:]:
+        if "decision" in payload["format"].get("properties", {}):
+            assert "포토샵" not in payload["messages"][-1]["content"]
+        else:
+            assert payload["messages"][-1]["content"] == "현재 레이어 목록 확인"
+            assert all("포토샵" not in value["content"] for value in payload["messages"] if value["role"] == "user")
