@@ -175,6 +175,25 @@ Choose accept for a faithful selection, repair for all necessary changes, unsupp
 Return the review JSON schema with a short Korean reason."""
 
 
+def count_scope_label(query):
+    """Label filtered counts for both chat and the existing group/value detail table."""
+    if not query.aggregate or query.aggregate.function != "count" or query.group_by:
+        return None
+    extensions = None
+    for predicate in query.where:
+        if predicate.field == "extension" and predicate.operator in {"eq", "in"}:
+            values = {"." + value.lower().lstrip(".") for value in predicate.values}
+            extensions = values if extensions is None else extensions & values
+    if extensions is None:
+        return "전체" if not query.where else "조건에 맞는 레이어"
+    labels = []
+    if {".tif", ".tiff"} <= extensions:
+        labels.append("TIFF (.tif/.tiff)")
+        extensions = extensions - {".tif", ".tiff"}
+    labels.extend(f"{ext[1:].upper()} ({ext})" for ext in sorted(extensions))
+    return " + ".join(labels) or "조건에 맞는 레이어"
+
+
 def summary(query, result):
     notice = ""
     if result.get("is_partial"):
@@ -194,6 +213,9 @@ def summary(query, result):
         values = [f"{record['group']}: {number(record['value'])}" if query.group_by else number(record["value"]) for record in records[:3]]
         unit = "개" if operation.function == "count" else ""
         target = "레이어" if operation.field == "*" else "파일 크기" if operation.field == "size_bytes" else FIELD_LABELS.get(operation.field, "조회 항목")
+        scope = count_scope_label(query)
+        if scope:
+            target = f"{scope} {target}"
         more = f"\n외 {len(records) - 3}개 항목은 상세 표에서 확인하세요." if len(records) > 3 else ""
         return f"{target} {labels[operation.function]}: " + "; ".join(values) + (f" {unit}" if unit else "") + more + notice
     records = result["records"]
@@ -517,6 +539,9 @@ class GeneralAgent:
                             continue
                         result = {**computed, "plan": query.model_dump(), "query": {"output": "count" if query.aggregate else "list"},
                                   "layers": session.rows if not query.aggregate else []}
+                        scope = count_scope_label(query)
+                        if scope:
+                            result["records"] = [{**record, "group": scope} for record in result["records"]]
                         if not query.aggregate:
                             result = attach_reference(result, session.rows)
                         trace.append(AgentToolResult(tool_name="query_layers", call_id=uuid4().hex, status="succeeded", result=result))

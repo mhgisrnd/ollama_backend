@@ -171,7 +171,9 @@ def execute(query, rows, available):
         return retained
 
     def quality(records):
-        missing_display = sum(any(value is None for value in record.values()) for record in records)
+        missing_display = sum(any(value is None for name, value in record.items()
+                                  if not (query.aggregate and not query.group_by and name == "group"))
+                              for record in records)
         warnings = []
         if excluded:
             fields = sorted(set().union(*excluded.values()))

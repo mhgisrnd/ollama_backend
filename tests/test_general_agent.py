@@ -70,6 +70,10 @@ def test_shorthand_format_counts_share_snapshot_and_keep_independent_scopes(text
             assert result["completion_status"] == "completed"
             queries = [item for item in result["tool_results"] if item["tool_name"] == "query_layers"]
             assert [item["result"]["records"][0]["value"] for item in queries] == expected
+            assert all(item["result"]["records"][0]["group"] for item in queries)
+            assert all(item["result"]["warnings"] == [] for item in queries)
+            assert "확인 불가" not in result["message"]["content"]
+            assert ("TIFF" if "tif" in text else "DXF") in result["message"]["content"]
             assert sum(item["tool_name"] == "get_layer_list" for item in result["tool_results"]) == 1
             assert captured == []
 
