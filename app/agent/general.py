@@ -21,6 +21,7 @@ from app.agent.formatting import format_size
 from app.agent.count_request import expand_count_request, count_queries
 from app.agent.query_constraints import enforce_explicit_scope
 from app.agent.photoshop import READ_TOOLS, OPEN_TOOL, IMAGE_EXTENSIONS, describe
+from app.agent import small_talk
 
 log = logging.getLogger("uvicorn.error.agent.general")
 
@@ -58,7 +59,7 @@ def planning_examples():
 
 class Task(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
-    tool: Literal["query_layers", "photoshop_ping", "photoshop_list_documents", "photoshop_get_document_info", "photoshop_get_layers", "photoshop_open_images", "open_numbered_images", "unsupported", "clarify"]
+    tool: Literal["query_layers", "photoshop_ping", "photoshop_list_documents", "photoshop_get_document_info", "photoshop_get_layers", "photoshop_open_images", "open_numbered_images", "chat", "unsupported", "clarify"]
     request: str = Field(min_length=1, max_length=4000)
     requested_count: int | None = Field(default=None, ge=1, le=1000,
                                         description="Explicit number of images requested; null for all/unspecified. An ordinal single image is 1. Never substitute an execution batch limit.")
@@ -103,6 +104,7 @@ For tasks other than open_numbered_images set numbers=[]. Never convert referenc
 Preserve invalid numbers such as 0 or out-of-range indices exactly; the executor rejects them. Never replace them with valid nearby numbers.
 For opening extract requested_count from the user's intent: null for all or unspecified count, N for explicitly N images, 1 for an ordinal single image. Never replace all with a batch limit. For other tasks requested_count=null.
 Only opening working copies is supported; editing, deleting and saving documents are unsupported.
+chat: general conversation that needs no desktop data, such as greetings, self-introduction or how to use the assistant. Never use chat for a request about layers, files or Photoshop.
 unsupported: requested ability does not exist (editing, deletion, synthesis, etc).
 clarify: target or intent cannot be determined from the current question and session.
 Split independently requested outputs into tasks (at most 3), preserving their dependencies and constraints.
@@ -336,7 +338,7 @@ class GeneralAgent:
                                    "reference_id": session.reference_id}
                 # Preserve incomplete-result scope for subsequent questions.
                 capabilities = {name: FIELDS[name] for name in sorted(available_fields)}
-                route_tools = available_tools | {"query_layers"} | ({"open_numbered_images"} if OPEN_TOOL in available_tools else set())
+                route_tools = available_tools | {"query_layers", "chat"} | ({"open_numbered_images"} if OPEN_TOOL in available_tools else set())
                 task_payload = ({"model": model, "message": {"content": json.dumps({"tasks": [
                     {"tool": "query_layers", "request": "현재 " + "/".join(query.where[0].values) + " 개수"}
                     for query in direct_counts]})}} if direct_counts else await state.ollama.chat([
@@ -347,6 +349,13 @@ class GeneralAgent:
                 model = task_payload["model"]
                 tasks = Tasks.model_validate_json(task_payload["message"]["content"]).tasks
                 log.info("Query routing client=%s tasks=%s", body.client_id, [task.model_dump() for task in tasks])
+                if all(task.tool == "chat" for task in tasks):
+                    model, content = await small_talk.reply(state.ollama, body.messages,
+                        "현재 프로젝트 레이어 조회(목록·개수·확장자·표시 여부·파일 크기 순위와 합계 등)와 후속 질문, "
+                        "포토샵 연결 확인·열린 문서 조회·조회한 이미지 열기. Photoshop 편집·저장·생성형 기능은 지원하지 않음")
+                    parts.append(content)
+                    return respond()
+                tasks = [task for task in tasks if task.tool != "chat"]
                 planned_tasks = len(tasks)
                 requested = [OPEN_TOOL if task.tool == "open_numbered_images" else task.tool for task in tasks]
                 # Refuse unsupported plans as a whole, before touching a desktop tool.

@@ -67,7 +67,7 @@ def test_shorthand_format_counts_share_snapshot_and_keep_independent_scopes(text
             pending = pool.submit(client.post, "/api/v1/agent/chat", json=request(text))
             reply(ws, "get_layer_list")
             result = pending.result(timeout=5).json()
-            assert result["completion_status"] == "completed"
+            assert result["completion_status"] == "completed", json.dumps(result, ensure_ascii=True)
             queries = [item for item in result["tool_results"] if item["tool_name"] == "query_layers"]
             assert [item["result"]["records"][0]["value"] for item in queries] == expected
             assert all(item["result"]["records"][0]["group"] for item in queries)

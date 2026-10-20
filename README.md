@@ -1,5 +1,78 @@
 # Spatial LLM Server
 
+기존 Python 벡터 프로그램(`spatial_editor_tool`)과 독립적으로 실행하는 Python/FastAPI AI 백엔드입니다.
+흐름: **사용자 질문 → Ollama LLM 계획 → Python 검증·계산 → WebSocket으로 벡터 프로그램에서 도구 실행 → 실제 결과로 답변**.
+채팅 UI와 도구 실행기(레이어 조회, Photoshop MCP)는 벡터 프로그램 쪽에 있고, 이 저장소는 백엔드만 담당합니다.
+
+## 운영 구조: 서버 PC와 로컬 개발 PC
+
+| 위치 | 역할 | 경로(예) |
+|---|---|---|
+| 서버 PC (서버용 데스크톱) | 실제 운영. Ollama·백엔드를 상시 실행하고 벡터 프로그램이 접속 | `C:\workspace\AI project\llm-server` |
+| 로컬 개발 PC | 고도화 작업용 사본. 개발·테스트 후 서버 PC에 반영 | `C:\workspace\LLM-server\ollama_backend` |
+
+이 문서의 경로 예시는 대부분 서버 PC 기준입니다. 로컬에서는 각자의 저장소 경로로 바꿔 읽으세요. 명령은 모두 **프로젝트 루트**에서 실행하므로 경로 외에는 같습니다. `.env`, `.venv`, `data/`(등록 DB·평가 결과)는 Git에서 제외되므로 PC마다 따로 만듭니다.
+
+## 로컬 개발 PC 빠른 시작
+
+### 1. 준비물
+
+- Python 3.11 이상. 3.11(서버 PC)과 3.13(로컬)에서 잠금 파일 설치와 전체 테스트 통과를 확인했습니다.
+- [Ollama](https://ollama.com/download/windows): 채팅·평가 스크립트에만 필요합니다. 서버 기동과 자동 테스트에는 필요 없습니다.
+
+### 2. 가상환경과 설정
+
+```powershell
+python -m venv .venv          # py 런처가 있으면: py -3.11 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements-lock.txt
+.\.venv\Scripts\python.exe -m pip install --no-deps -e .
+Copy-Item .env.example .env
+```
+
+### 3. 자동 테스트 (Ollama·벡터 프로그램 불필요)
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest -q
+```
+
+2026-10-20 로컬 기준 **130개 통과**. 모델과 WebSocket은 모의 객체를 사용합니다.
+
+### 4. Ollama 모델
+
+`.env`의 `LLM_SERVER_OLLAMA_MODEL`과 같은 이름의 모델이 `ollama list`에 있어야 합니다.
+
+```powershell
+ollama pull qwen2.5:3b          # structured 모드(기본)
+ollama pull qwen3:4b-instruct   # general 모드를 쓸 때
+ollama list
+```
+
+### 5. 서버 실행과 확인
+
+```powershell
+.\.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
+```
+
+- http://127.0.0.1:8000/api/v1/health → `{"status":"ok"}`
+- http://127.0.0.1:8000/docs → `GET /api/v1/ollama/status`로 Ollama 연결과 모델 설치 확인
+
+### 6. 벡터 프로그램 없이 할 수 있는 것
+
+- 자동 테스트 (3단계)
+- Swagger의 `POST /api/v1/chat` 일반 채팅
+- 실제 Ollama와 합성 데이터로 돌리는 평가 스크립트 (벡터 프로그램·Photoshop을 건드리지 않음)
+
+```powershell
+.\.venv\Scripts\python.exe -m app.experiments.evaluate_structured_agent
+.\.venv\Scripts\python.exe -m app.experiments.evaluate_general_agent --model qwen3:4b-instruct --report data/evaluations/general_local.json
+```
+
+`/api/v1/agent/chat`과 도구 실행 API는 WebSocket으로 연결된 벡터 프로그램이 있어야 동작합니다. 로컬에서 끝까지 테스트하려면 벡터 프로그램이 이 PC의 백엔드 주소(`http://127.0.0.1:8000`)로 접속하도록 설정하고 둘 다 실행합니다. 하단에 `AI: 연결됨`이 표시되어야 합니다. 상세한 절차는 아래 "4단계 일부: WebSocket 실행 요청과 결과 반환"을 참고하세요.
+
+### 7. 서버 PC에 반영
+
+로컬에서 커밋한 뒤 서버 PC에서 받아오고, 의존성이 바뀌었으면 잠금 파일로 다시 설치합니다. 그다음 백엔드와 벡터 프로그램을 **둘 다 재시작**합니다. 서버 PC의 `.env`는 덮어쓰지 않습니다. `.env.example`에 새 설정이 생겼을 때만 직접 추가합니다.
+
 ## AI 요청 중지
 
 채팅 처리 중에는 전송 버튼이 **중지**로 바뀝니다. 클라이언트와 서버를 모두 업데이트·재시작해야 합니다. 개발 서버에도 변경 소스를 반영하고 FastAPI를 재시작하세요.
@@ -54,8 +127,7 @@
 .\.venv\Scripts\python.exe -m app.experiments.evaluate_general_agent --model qwen3:4b-instruct --report data/evaluations/photoshop_tools_fixed.json --diagnostic-log data/evaluations/photoshop_tools_fixed.log --case-index 17 --case-index 18 --case-index 19 --case-index 20
 ```
 
-기존 Python 벡터 프로그램과 독립적으로 실행하는 Python/FastAPI AI 백엔드입니다.
-현재는 **LLM 도구 선택 → WebSocket 실행 → 결과를 반영한 답변 생성**까지 구현했습니다. 별도 벡터 프로그램 프로젝트에는 도킹·분리 가능한 채팅 UI를 연결했습니다.
+별도의 벡터 프로그램 프로젝트에는 도킹과 분리가 가능한 채팅 UI를 연결했습니다.
 
 ## 현재 범위
 
@@ -66,7 +138,7 @@
 
 Ollama 연결 확인, 비스트리밍 채팅, 프로그램별 도구 목록 등록·조회·형식 검증을 제공합니다.
 WebSocket으로 연결된 벡터 프로그램의 레이어 조회·Photoshop ping을 직접 테스트할 수 있습니다.
-읽기 전용 레이어 조건 조회와 Photoshop 통신 확인을 제공합니다. 영상 편집 자동화, 사용자 인증·세션 영구 저장은 아직 구현하지 않았습니다.
+읽기 전용 레이어 조건 조회, Photoshop 통신 확인·문서 조회·이미지 열기를 제공합니다. AI를 통한 Photoshop 편집은 차단되어 있습니다. 영상 편집 자동화, 사용자 인증, 세션 영구 저장은 아직 구현하지 않았습니다.
 백엔드는 기존 `C:\workspace\spatial_editor_tool`의 실행 환경에 의존하지 않습니다. 채팅 UI와 실행 클라이언트는 해당 별도 프로젝트에 구현합니다.
 별도 웹 UI는 만들지 않으며 `/docs`는 개발용 API 문서입니다.
 
@@ -82,8 +154,10 @@ WebSocket으로 연결된 벡터 프로그램의 레이어 조회·Photoshop pin
 - `전체 레이어에서 shp만 이름을 알려줘. 표시 여부는 상관없어.` → 최신 전체 대상에서 조건 변경
 - `조건을 초기화하고 지금 전체 레이어 목록을 다시 확인해줘` → 새 조회
 - `레이어 목록과 포토샵 연결 상태 알려줘` → 두 기능의 실제 결과 반환
+- `현재 포토샵 문서를 조금 밝게 해줘` → 편집 미지원으로 거절
+- `자기소개 해주세요`, `뭘 할 수 있어?` → 라우터가 `chat`으로 분류하면 LLM이 자유롭게 답변. 이때는 데이터를 조회하지 않으므로 레이어 수치를 추측하지 않도록 지시합니다(`app/agent/small_talk.py`, `general` 모드도 동일). 허용 목록 밖의 편집·삭제·저장 요청은 거절합니다.
 
-조건은 현재 TIFF(`.tif`·`.tiff`), SHP(`.shp`), 표시 여부, 개수·목록을 지원합니다. 모든 자연어 표현의 정확성을 보장하지는 않습니다. 명시적인 개수·숨김 조건과 충돌하는 계획은 실행 전에 한 번 보정하며, 보정 실패 시 실행하지 않습니다. 질문 표현별 실행 코드를 추가하는 방식은 아닙니다.
+조건은 현재 TIFF(`.tif`·`.tiff`), SHP(`.shp`), 표시 여부, 개수·목록을 지원합니다. 모든 자연어 표현의 정확성을 보장하지는 않습니다. 명시적인 개수·숨김·형식(tif/shp/dxf/ecw 언급인데 확장자 조건 없음) 조건과 충돌하는 계획은 실행 전에 한 번 보정하며, 보정 실패 시 실행하지 않습니다. `.tif`와 `.tiff`는 한쪽만 지정돼도 둘 다 포함합니다. 질문 표현별 실행 코드를 추가하는 방식은 아닙니다.
 
 POST `/api/v1/agent/chat`에는 기존 `client_id`, `messages`에 더해 선택적인 `session_id`가 있습니다. 같은 대화는 같은 ID, 새 대화는 새 ID를 사용합니다. 벡터 UI가 자동 관리합니다. `session_id` 생략 시 단일 요청이며 후속 조회 결과를 보관하지 않습니다.
 
@@ -92,6 +166,8 @@ POST `/api/v1/agent/chat`에는 기존 `client_id`, `messages`에 더해 선택�
 조건 결과는 `query_result`에, 실제 실행 내역은 `tool_results`에 반환합니다. `query_layers`는 서버의 내부 계산 도구이며, 현재 데이터가 필요할 때만 기존 클라이언트 `get_layer_list`를 호출합니다. 클라이언트 MCP 도구 목록을 바꿀 필요는 없습니다. 일부 데이터만 수신하면 전체 개수를 추측하지 않습니다. 개수 응답에는 전체 목록을 표시하지 않습니다.
 
 모듈: `app/agent/structured.py`(계획·세션·실행), `app/agent/layer_query.py`(스키마·계산), `app/llm/ollama.py`(모델 어댑터). 기능 확장 시 입력 명세·검증·실행기·응답 처리를 함께 추가합니다. 임의 코드 실행은 지원하지 않습니다.
+
+Photoshop은 기존 연결 확인·문서/레이어 조회·작업 복사본 열기만 지원합니다. AI의 문서 편집·저장·내보내기·생성형 기능·임의 스크립트 실행은 허용하지 않습니다.
 
 반영 후 백엔드와 벡터 프로그램을 모두 재실행하세요. Ollama가 실행 중이고 모델이 설치되어 있어야 합니다.
 
@@ -104,21 +180,25 @@ POST `/api/v1/agent/chat`에는 기존 `client_id`, `messages`에 더해 선택�
 
 2026-10-16 최종 연결 로직은 합성 데이터의 후속 질문 10개와 첫 질문 복합 조회 3개, 총 13/13을 통과했습니다. 예열된 모델과 Python 계산은 단일 조회 약 0.4~1.3초, 복합 조회 약 1.5~2초였습니다. 실제 GUI·배포 GPU 성능이나 모든 질문에 대한 정확도 보장은 아닙니다. 자동 검증은 백엔드 57개, 벡터 UI·연결 관련 31개가 통과했습니다.
 
+2026-10-20 로컬 개발 PC(Ollama 0.40.5)에서는 같은 평가가 2번째 질문에서 `invalid_query_plan`으로 중단됐습니다. 모델이 개수 질문에 `output=list`를 내고, `shp`·`.tiff` 조건을 빠뜨리는 일이 실행마다 달리 나타났습니다. 개수 예시 추가, 형식 누락 보정, TIF/TIFF 정규화를 적용한 뒤 3회 연속 13/13을 통과했습니다. 라우터 예시는 순서에 민감합니다(`chat` 예시를 맨 뒤에 두면 `그중 숨겨진 것만…`이 거절로 분류됨). 예시를 바꾸면 이 평가를 다시 돌려 확인하세요.
+
 `현재 레이어 목록은 어떻고 그중 tif는 몇개인지 알려줘`처럼 목록과 개수를 한 번에 요청할 수도 있습니다. 여러 출력이 필요한 요청은 LLM이 최대 3개의 작은 조회 질문으로 나누고, 기존 단일 조회 계획 생성기를 재사용합니다. 전체 계획 검증 후 순서대로 실행하므로 첫 질문 안의 `그중`도 앞 단계 결과를 대상으로 처리할 수 있습니다. 단독 `그중 tif는 몇 개야?`에 이전 결과가 없을 때는 임의로 새 전체 조회를 만들지 않습니다.
 
 같은 요청의 최신 조회 단계들은 한 번 수신한 동일 스냅샷을 공유합니다. 첫 단계가 무조건 전체 목록일 때 두 번째 단계의 `current`와 `previous_result`는 이 스냅샷에서 같은 집합을 가리키므로 복합 조회 검증은 결과·전체 목록·실제 원격 조회 1회 여부로 판정합니다. 필터된 첫 결과를 대상으로 하는 일반 후속 질문은 계속 `previous_result`를 검증합니다. 여러 목록이 있으면 UI에서 각각 별도 목록 링크로 표시합니다.
 
 ## 환경
 
-- Python 3.11 이상 (현재 로컬 검증: Python 3.11)
+- Python 3.11 이상 (검증: 서버 PC 3.11, 로컬 개발 PC 3.13)
 - Windows PowerShell 기준 명령
 - 서버 생존 확인에는 Ollama가 필요하지 않습니다. 실제 채팅에는 실행 중인 Ollama와 설치된 모델이 필요합니다.
-- Node·Photoshop은 이번 단계에서 사용하지 않습니다.
+- Node는 사용하지 않습니다. Photoshop은 백엔드가 직접 다루지 않고, 벡터 프로그램의 Photoshop MCP를 통해 사용합니다.
 
 ## 설치
 
+서버 PC 기준입니다. 로컬 개발 PC는 위의 "로컬 개발 PC 빠른 시작"을 따릅니다.
+
 ```powershell
-Set-Location 'C:\workspace\AI project\llm-server'
+Set-Location 'C:\workspace\AI project\llm-server'   # 서버 PC 경로
 py -3.11 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements-lock.txt
 .\.venv\Scripts\python.exe -m pip install --no-deps -e .
@@ -172,10 +252,22 @@ Invoke-RestMethod 'http://127.0.0.1:8000/api/v1/health'
 
 `.env.example`을 참고합니다. OS 환경변수가 `.env`보다 우선합니다.
 
+전체 목록은 `app/core/config.py`에 있습니다. 모든 변수에 `LLM_SERVER_` 접두사가 붙습니다.
+
 | 변수 | 기본값 | 역할 |
 |---|---|---|
 | `LLM_SERVER_APP_NAME` | `Spatial LLM Server` | API 문서의 서비스 이름 |
 | `LLM_SERVER_ENVIRONMENT` | `local` | 실행 환경 표시값; 배포·인증 모드를 자동 변경하지 않음 |
+| `LLM_SERVER_AGENT_MODE` | `structured` | `structured` / `general` / `native` |
+| `LLM_SERVER_AGENT_TIMEOUT_SECONDS` | `240` | 에이전트 요청 전체 제한(10~600) |
+| `LLM_SERVER_REGISTRY_DATABASE_PATH` | `data/registry.sqlite3` | 프로그램·도구 등록 DB |
+| `LLM_SERVER_OLLAMA_BASE_URL` | `http://127.0.0.1:11434` | Ollama 주소 |
+| `LLM_SERVER_OLLAMA_MODEL` | `qwen2.5:3b` | 사용 모델 |
+| `LLM_SERVER_OLLAMA_TIMEOUT_SECONDS` | `120` | 모델 호출 제한 |
+| `LLM_SERVER_OLLAMA_NUM_CTX` | `4096` | 컨텍스트 토큰 수 |
+| `LLM_SERVER_OLLAMA_NUM_PREDICT` | `512` | 최대 생성 토큰 수 |
+| `LLM_SERVER_OLLAMA_KEEP_ALIVE` | `5m` | 응답 후 모델 유지 시간 |
+| `LLM_SERVER_OLLAMA_DISABLE_THINKING` | `true` | think=false 적용 |
 
 `.env`는 프로젝트 루트 기준으로 읽습니다. 호스트·포트는 Uvicorn 실행 인자로 지정합니다.
 설정 변경 후 서버를 재시작합니다. `.env`와 `.venv`는 Git 추적에서 제외합니다.
@@ -187,19 +279,32 @@ Invoke-RestMethod 'http://127.0.0.1:8000/api/v1/health'
 .\.venv\Scripts\python.exe -m pip check
 ```
 
-헬스 응답, OpenAPI 경로, API 문서 제공, 환경변수 적용을 검사합니다.
+API, 설정, 등록 DB, WebSocket 실행, 각 에이전트 모드, 질의 엔진, 요청 취소를 검사합니다. 모델과 벡터 프로그램은 모의 객체로 대체합니다. 문서 곳곳의 "테스트 N개 통과"는 그 기능을 추가했을 때의 기록입니다. 현재 개수는 직접 실행해서 확인하세요(2026-10-20 기준 130개).
 
 ## 모듈 구성
 
 ```text
 app/
-  main.py             # 앱 생성과 라우터 연결
-  api/health.py       # /api/v1/health
-  core/config.py      # 환경 설정
-tests/test_app.py     # 기본 API·설정 검증
-pyproject.toml       # 프로젝트·의존성 범위
-requirements-lock.txt # 검증한 정확한 의존성 버전
-.env.example         # 설정 예시
+  main.py               # 앱 생성과 라우터 연결
+  core/config.py        # 환경 설정 (LLM_SERVER_*)
+  api/                  # health, ollama, chat, clients(등록), execution(WebSocket·직접 실행), agent(채팅·취소)
+  llm/ollama.py         # Ollama 어댑터
+  agent/
+    runner.py           # native 모드
+    structured.py       # structured 모드 (기본)
+    layer_query.py      # structured 조회 스키마·계산
+    general.py          # general 모드 (계획·검토·실행)
+    query_engine.py     # general 공통 질의 엔진
+    photoshop.py        # Photoshop 도구 결과 처리
+    cancellation.py     # AI 요청 중지
+    coverage.py, count_request.py, query_constraints.py, formatting.py
+  execution/connections.py  # WebSocket 연결·호출 관리
+  storage/registry.py   # SQLite 프로그램·도구 등록
+  schemas/              # 요청·응답 모델
+  experiments/          # 실제 Ollama 평가 스크립트 (API에 연결되지 않음)
+tests/                  # 자동 테스트
+requirements-lock.txt   # 검증한 정확한 의존성 버전
+.env.example            # 설정 예시
 ```
 
 ## 이후 개발 경계
@@ -214,7 +319,6 @@ requirements-lock.txt # 검증한 정확한 의존성 버전
 Ollama가 추론을 담당하고, 백엔드가 대화·도구 선택·작업 전달을 담당합니다.
 실제 벡터 편집·OpenCV·Photoshop MCP 실행은 벡터 프로그램 측에서 담당하는 구조입니다.
 향후 통신 계약에는 사용자/대화/클라이언트/작업/호출 식별자를 포함하고, 도구 결과와 연결 복구를 설계합니다.
-이번 단계에서는 미확정 채팅·도구 API나 임시 에코 WebSocket을 만들지 않습니다.
 
 ## 참고
 
@@ -333,7 +437,7 @@ Ollama·Photoshop이 꺼져 있어도 등록을 테스트할 수 있습니다.
 실행 중인 서버를 Ctrl+C로 종료하고 다음 명령을 실행합니다. 기존 `.env`는 유지합니다.
 
 ```powershell
-Set-Location 'C:\workspace\AI project\llm-server'
+Set-Location 'C:\workspace\AI project\llm-server'   # 서버 PC 경로
 .\.venv\Scripts\python.exe -m pip install -r requirements-lock.txt
 .\.venv\Scripts\python.exe -m pip install --no-deps -e .
 .\.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
@@ -507,8 +611,7 @@ Photoshop을 실행한 상태에서 다음 요청으로 MCP 경로를 테스트�
 
 `status: succeeded`, `result.connected: true`가 정상 연결 확인입니다.
 Photoshop 미실행·MCP 오류는 `status: failed`와 `error`로 반환될 수 있습니다.
-현재 연결한 실제 실행기는 **get_layer_list와 photoshop_ping만** 허용합니다.
-앞서 예시로 등록했던 photoshop_open_image는 아직 실행기를 제공하지 않으므로 벡터 프로그램의 실제 목록에서 제외했습니다.
+백엔드는 도구 이름을 따로 제한하지 않습니다. 벡터 프로그램이 등록한 도구라면 등록된 입력 스키마로 인자를 검증한 뒤 실행합니다. 백엔드 에이전트 코드가 사용하는 도구는 `get_layer_list`, `get_layer_metadata`, `photoshop_ping`, `photoshop_list_documents`, `photoshop_get_document_info`, `photoshop_get_layers`, `photoshop_open_images`입니다. 벡터 프로그램이 실제로 등록한 목록은 `GET /api/v1/clients/{client_id}/tools`로 확인합니다.
 
 ### 오류·연결 복구
 
@@ -816,7 +919,7 @@ Python 실행기와 연결·UI 자동 테스트는 총 **107개(백엔드 73, �
 
 ### 범용 모드의 누락 정보 처리
 
-단순 목록 계획에는 필요한 기본 필드만 선택하도록 지침·검토 기준을 적용합니다. 표시용 필드가 누락되어도 레이어를 제거하지 않으며 해당 값은 JSON `null`, 채팅·상세 표에서는 `확인 불가`로 표시합니다.
+단순 목록 계획에는 필요한 기본 필드만 선택하도록 지침·검토 기준을 적용합니다. 표시용 필드가 누락되어도 레이어를 제거하지 않으며 해당 값은 JSON `null`, 채팅·상세 표에서는 `확인 불가`로 표시합니다. 단, 필터된 개수 집계(예: TIFF 개수)는 그룹 열에 `TIFF (.tif/.tiff)`처럼 집계 대상을 표시하며, 이 열을 누락 값으로 보지 않습니다.
 
 필터·정렬·숫자 집계에 필요한 값이 없으면 해당 행을 연산에서 제외하고, `query_result.is_partial=true`, `excluded_count`, `warnings`로 한계를 전달합니다. 응답은 `completion_status=partial`, `warning=incomplete_data`이며, 확인된 데이터 기준의 결과라고 명시합니다. 전체가 누락된 합계는 0이 아닌 `null`입니다. 부분 결과를 대상으로 한 후속 조회에도 이전 한계를 유지합니다. 따라서 확인된 파일 중 최대값을 전체 파일의 최대값으로 단정하지 않습니다.
 
