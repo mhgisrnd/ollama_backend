@@ -3,13 +3,21 @@ from pathlib import PurePosixPath
 from typing import Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class Filters(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     extensions: list[Literal[".tif", ".tiff", ".shp", ".dxf", ".ecw"]] = Field(max_length=5)
     visible: bool | None
+
+    @field_validator("extensions")
+    @classmethod
+    def same_tiff_format(cls, value):
+        # .tif and .tiff are one format; the model sometimes names only one.
+        if {".tif", ".tiff"} & set(value):
+            value = list(dict.fromkeys(value + [".tif", ".tiff"]))
+        return value
 
 
 class LayerQuery(BaseModel):

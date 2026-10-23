@@ -208,3 +208,24 @@ def test_decomposition_is_bounded_and_cannot_fabricate_a_missing_base_query():
             assert result["tool_results"] == []
             assert client.post("/api/v1/agent/chat", json=body(question)).status_code == 502
             assert not client.app.state.agent.busy
+
+
+def test_named_format_dropped_by_model_is_repaired_or_refused():
+    everything = {"source": "current", "filters": {"extensions": [], "visible": None}, "output": "list"}
+    shp = {**everything, "filters": {"extensions": [".shp"], "visible": None}}
+    with client_for([{"operations": ["query_layers"]}, everything, shp,
+                     {"operations": ["query_layers"]}, everything, everything]) as client:
+        register(client)
+        with client.websocket_connect(BASE + "/ws") as ws, ThreadPoolExecutor(1) as pool:
+            ws.receive_json()
+            pending = pool.submit(client.post, "/api/v1/agent/chat", json=body("전체 레이어에서 shp만 이름을 알려줘"))
+            reply_layers(ws)
+            assert pending.result(timeout=5).json()["query_result"]["count"] == 2
+            assert client.post("/api/v1/agent/chat", json=body("전체 레이어에서 shp만 이름을 알려줘")).status_code == 502
+
+
+def test_tif_and_tiff_are_one_format():
+    from app.agent.layer_query import Filters
+    assert Filters(extensions=[".tif"], visible=None).extensions == [".tif", ".tiff"]
+    assert Filters(extensions=[".shp", ".tiff"], visible=None).extensions == [".shp", ".tiff", ".tif"]
+    assert Filters(extensions=[".shp"], visible=None).extensions == [".shp"]
