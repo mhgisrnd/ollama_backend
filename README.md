@@ -1,5 +1,25 @@
 # Spatial LLM Server
 
+## 개발 서버 실행
+
+프로젝트 루트에서 실행합니다.
+
+```powershell
+.\.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
+```
+
+- 상태 확인: http://127.0.0.1:8000/api/v1/health
+- API 문서: http://127.0.0.1:8000/docs
+- API 명세: http://127.0.0.1:8000/openapi.json
+- 종료: 서버 터미널에서 `Ctrl+C`
+
+다른 PowerShell 창에서 확인:
+
+```powershell
+Invoke-RestMethod 'http://127.0.0.1:8000/api/v1/health'
+```
+
+
 ## AI 요청 중지
 
 채팅 처리 중에는 전송 버튼이 **중지**로 바뀝니다. 클라이언트와 서버를 모두 업데이트·재시작해야 합니다. 개발 서버에도 변경 소스를 반영하고 FastAPI를 재시작하세요.
@@ -137,24 +157,7 @@ Copy-Item .env.example .env
 .\.venv\Scripts\python.exe -m pip freeze --exclude-editable | Set-Content -Encoding utf8 requirements-lock.txt
 ```
 
-## 개발 서버 실행
 
-프로젝트 루트에서 실행합니다.
-
-```powershell
-.\.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
-```
-
-- 상태 확인: http://127.0.0.1:8000/api/v1/health
-- API 문서: http://127.0.0.1:8000/docs
-- API 명세: http://127.0.0.1:8000/openapi.json
-- 종료: 서버 터미널에서 `Ctrl+C`
-
-다른 PowerShell 창에서 확인:
-
-```powershell
-Invoke-RestMethod 'http://127.0.0.1:8000/api/v1/health'
-```
 
 예상 JSON 응답: `{"status":"ok"}`. 백엔드 생존 상태만 의미하며 Ollama·Photoshop 연결 상태는 아닙니다.
 `/` 경로는 구현하지 않았으므로 404가 정상입니다.
